@@ -65,7 +65,7 @@ def build_sam2_video_predictor(
         ]
     hydra_overrides.extend(hydra_overrides_extra)
 
-    # Read config and init model
+    # Read config and init model 我觉得这里非常重要，先加载配置，然后load_checkpoint
     cfg = compose(config_name=config_file, overrides=hydra_overrides)
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)

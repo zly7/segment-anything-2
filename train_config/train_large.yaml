@@ -1,0 +1,23 @@
+model:
+  model_config: "sam2_hiera_l.yaml"
+  pretrain_model_path: "/home/zly/multi_ob/segment-anything-2/checkpoints/sam2_hiera_large.pt"
+train:
+  learning_rate: 2e-5
+  num_epochs: 8
+  save_path: '/data2/zly/training/'
+  batch_size_one_gpu: 6
+  validate_first: True
+  num_workers_dataloader: 8
+  transfer_image_in_dataset: True
+log:
+  tensorboard_log_dir: './logs_tensorboard'
+  loguru_log_file: './logs/train/training_cuda1.log'
+  log_interval: 12
+  exp_name: "sam2_large"
+dataset:
+  train_dataloader: MOTS
+  train_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
+  val_dataloader: MOTS
+  val_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
+  test_dataloader: MOTS
+  test_dataset_root_path: "/data2/zly/mots_data/MOTS2020/test"

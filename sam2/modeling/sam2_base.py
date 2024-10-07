@@ -514,7 +514,7 @@ class SAM2Base(torch.nn.Module):
 
         num_obj_ptr_tokens = 0
         # Step 1: condition the visual features of the current frame on previous memories
-        if not is_init_cond_frame:
+        if not is_init_cond_frame: # 这里如果add_new_box就是init_cond_frame
             # Retrieve the memories encoded with the maskmem backbone
             to_cat_memory, to_cat_memory_pos_embed = [], []
             # Add conditioning frames's output first (all cond frames have t_pos=0 for
@@ -522,7 +522,7 @@ class SAM2Base(torch.nn.Module):
             assert len(output_dict["cond_frame_outputs"]) > 0
             # Select a maximum number of temporally closest cond frames for cross attention
             cond_outputs = output_dict["cond_frame_outputs"]
-            selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames(
+            selected_cond_outputs, unselected_cond_outputs = select_closest_cond_frames( # 这里说不定就选择了所有的条件帧
                 frame_idx, cond_outputs, self.max_cond_frames_in_attn
             )
             t_pos_and_prevs = [(0, out) for out in selected_cond_outputs.values()]
@@ -567,7 +567,7 @@ class SAM2Base(torch.nn.Module):
                     continue  # skip padding frames
                 # "maskmem_features" might have been offloaded to CPU in demo use cases,
                 # so we load it back to GPU (it's a no-op if it's already on GPU).
-                feats = prev["maskmem_features"].cuda(non_blocking=True)
+                feats = prev["maskmem_features"].cuda(non_blocking=True) # [obj_num,64,64,64]
                 to_cat_memory.append(feats.flatten(2).permute(2, 0, 1))
                 # Spatial positional encoding (it might have been offloaded to CPU in eval)
                 maskmem_enc = prev["maskmem_pos_enc"][-1].cuda()
@@ -647,11 +647,11 @@ class SAM2Base(torch.nn.Module):
             to_cat_memory_pos_embed = [self.no_mem_pos_enc.expand(1, B, self.mem_dim)]
 
         # Step 2: Concatenate the memories and forward through the transformer encoder
-        memory = torch.cat(to_cat_memory, dim=0)
+        memory = torch.cat(to_cat_memory, dim=0) # [之前所有总和,obj_num,64] 而且全在cuda上
         memory_pos_embed = torch.cat(to_cat_memory_pos_embed, dim=0)
 
-        pix_feat_with_mem = self.memory_attention(
-            curr=current_vision_feats,
+        pix_feat_with_mem = self.memory_attention( 
+            curr=current_vision_feats, # [4096,obj_num,256]
             curr_pos=current_vision_pos_embeds,
             memory=memory,
             memory_pos=memory_pos_embed,
@@ -659,7 +659,7 @@ class SAM2Base(torch.nn.Module):
         )
         # reshape the output (HW)BC => BCHW
         pix_feat_with_mem = pix_feat_with_mem.permute(1, 2, 0).view(B, C, H, W)
-        return pix_feat_with_mem
+        return pix_feat_with_mem #[obj_num,256,64,64]
 
     def _encode_new_memory(
         self,
@@ -740,11 +740,11 @@ class SAM2Base(torch.nn.Module):
                 pix_feat, high_res_features, mask_inputs
             )
         else:
-            # fused the visual feature with previous memory features in the memory bank
+            # fused the visual feature with previous memory features in the memory bank,pix_feat_with_mem : [how_many_objs,256,64,64]
             pix_feat_with_mem = self._prepare_memory_conditioned_features(
                 frame_idx=frame_idx,
                 is_init_cond_frame=is_init_cond_frame,
-                current_vision_feats=current_vision_feats[-1:],
+                current_vision_feats=current_vision_feats[-1:], # 创建包含最后元素的列表[1,2,3] -> [3]
                 current_vision_pos_embeds=current_vision_pos_embeds[-1:],
                 feat_sizes=feat_sizes[-1:],
                 output_dict=output_dict,
@@ -770,8 +770,8 @@ class SAM2Base(torch.nn.Module):
             _,
             _,
             _,
-            low_res_masks,
-            high_res_masks,
+            low_res_masks, # [how_many_objects,1,256,256]
+            high_res_masks,  # [how_many_objects,1,1024,1024]
             obj_ptr,
             _,
         ) = sam_outputs

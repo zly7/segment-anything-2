@@ -703,7 +703,7 @@ class SAM2VideoPredictor(SAM2Base):
                     inference_state=inference_state,
                     output_dict=output_dict,
                     frame_idx=frame_idx,
-                    batch_size=batch_size,
+                    batch_size=batch_size, # equal to the number of objects
                     is_init_cond_frame=False,
                     point_inputs=None,
                     mask_inputs=None,
@@ -728,7 +728,7 @@ class SAM2VideoPredictor(SAM2Base):
     def _add_output_per_object(
         self, inference_state, frame_idx, current_out, storage_key
     ):
-        """
+        """ 这个函数相当于把整个一帧的输出给分到每个object上
         Split a multi-object output into per-object output slices and add them into
         `output_dict_per_obj`. The resulting slices share the same tensor storage.
         """
@@ -805,7 +805,7 @@ class SAM2VideoPredictor(SAM2Base):
             "backbone_fpn": backbone_out["backbone_fpn"].copy(),
             "vision_pos_enc": backbone_out["vision_pos_enc"].copy(),
         }
-        for i, feat in enumerate(expanded_backbone_out["backbone_fpn"]):
+        for i, feat in enumerate(expanded_backbone_out["backbone_fpn"]): # 这里是3次金字塔的feature迭代
             expanded_backbone_out["backbone_fpn"][i] = feat.expand(
                 batch_size, -1, -1, -1
             )
@@ -814,7 +814,7 @@ class SAM2VideoPredictor(SAM2Base):
             expanded_backbone_out["vision_pos_enc"][i] = pos
 
         features = self._prepare_backbone_features(expanded_backbone_out)
-        features = (expanded_image,) + features
+        features = (expanded_image,) + features  # 元组相加
         return features
 
     def _run_single_frame_inference(
@@ -834,10 +834,10 @@ class SAM2VideoPredictor(SAM2Base):
         # Retrieve correct image features
         (
             _,
-            _,
-            current_vision_feats,
+            _,                    # 就是如果是在处理了，current_vision_feats[2]是[4096,obj_num,256]
+            current_vision_feats, # 找到图片本身的金字塔 feature [65536,1,32],[16384,1,64],[4096,1,256],这里和obj_num有关
             current_vision_pos_embeds,
-            feat_sizes,
+            feat_sizes, # [256,256],[128,128],[64,64]
         ) = self._get_image_feature(inference_state, frame_idx, batch_size)
 
         # point and mask should not appear as input simultaneously on the same frame

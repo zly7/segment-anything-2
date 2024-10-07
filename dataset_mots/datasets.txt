@@ -1,0 +1,188 @@
+import os
+import random
+import numpy as np
+import torch
+from torch.utils.data import Dataset
+import glob
+import PIL.Image as Image
+import pycocotools.mask as rletools
+import sys
+import cv2  # Added for augmentations
+# sys.path.append("/home/zly/multi_ob/SAM-Adapter-PyTorch/datasets_mots")
+from .mots_io import load_txt
+from loguru import logger
+from sam2.utils.transforms import SAM2Transforms
+class MOTSDataset(Dataset):
+    def __init__(self, root_path, use_SAM2_transform = True, augment=False, img_output_size=1024, max_length_for_validate = -1, enable_negative_sample = True):
+        self.root_path = root_path
+        self._pre_data = {}
+        self.data = []
+        self.augment = augment
+        self.img_output_size = img_output_size
+        self.max_length_for_validate = max_length_for_validate
+        self.whether_use_sam2_transform = use_SAM2_transform
+        self.sam2_transform = SAM2Transforms(resolution=img_output_size, mask_threshold=0)
+        self.enable_negative_sample = enable_negative_sample
+        self.load_data()
+
+    def load_data(self):
+        '''
+        This function loads the dataset list.
+        '''
+        for seq in os.listdir(self.root_path):
+            seq_path = os.path.join(self.root_path, seq)
+            gt_path = os.path.join(seq_path, 'gt', 'gt.txt')
+            img_folder_path = os.path.join(seq_path, 'img1')
+            self._pre_data[gt_path] = load_txt(gt_path)
+            for frame, SegmentedObject_list in self._pre_data[gt_path].items():
+                img_path = os.path.join(img_folder_path, f"{frame:06d}.jpg")
+                for SegmentedObject_instance in SegmentedObject_list:
+                    self.data.append((img_path, SegmentedObject_instance))
+            logger.success(f"Successfully load {seq_path}")
+        if self.max_length_for_validate != -1:
+            random.shuffle(self.data)
+            self.data = self.data[:self.max_length_for_validate]
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        img_path, SegmentedObject_instance = self.data[idx]
+        image = Image.open(img_path)
+        image = np.array(image) # H,W,C
+
+        # Decode the binary mask
+        binary_mask = rletools.decode(SegmentedObject_instance.mask)
+
+        ys, xs = np.where(binary_mask)
+        if len(ys) == 0:
+            raise Exception(f"No pixels found in mask for idx {idx}")
+        random_idx = random.randint(0, len(ys) - 1)
+        click_point = (xs[random_idx], ys[random_idx])
+
+        sample = {
+            'image_path': img_path,
+            'image': image,
+            'mask': binary_mask,
+            'click_point': click_point
+        }
+
+        if self.augment:
+            sample = self.transform(sample)
+        else:
+            # Resize to output size
+            if self.whether_use_sam2_transform:
+                sample['image'] = self.sam2_transform(image)
+            else:
+                sample['image'] = cv2.resize(sample['image'], (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_LINEAR)
+                sample['image'] = torch.from_numpy(sample['image']).permute(2, 0, 1).float()  # (C, H, W)
+            sample['mask'] = cv2.resize(sample['mask'], (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_NEAREST)
+            # Adjust click_point accordingly
+            h_orig, w_orig = binary_mask.shape[:2]
+            scale_x = self.img_output_size / w_orig
+            scale_y = self.img_output_size / h_orig
+            # sample['click_point'] = (int(click_point[0] * scale_x), int(click_point[1] * scale_y))
+            sample['click_point'] = (click_point[0] * scale_x,click_point[1] * scale_y)
+
+        # Convert to tensors
+        
+        sample['mask'] = torch.from_numpy(sample['mask']).unsqueeze(0).float()  # (1, H, W)
+        sample['click_point'] = torch.tensor(sample['click_point']).unsqueeze(0).float()  # (1,2)
+        sample['point_label'] = torch.tensor([1]).float()  # (1,)
+        return sample
+
+    def transform(self, sample):
+        image = sample['image']
+        mask = sample['mask']
+        click_point = sample['click_point']
+
+        # Random scaling
+        if random.random() < 0.5:
+            image, mask, click_point = self.random_scale(image, mask, click_point)
+
+        # Random rotation
+        if random.random() < 0.5:
+            image, mask, click_point = self.random_rotation(image, mask, click_point)
+
+        # Random flipping
+        if random.random() < 0.5:
+            image, mask, click_point = self.random_flip(image, mask, click_point)
+
+        # Random cropping
+        image, mask, click_point = self.random_crop(image, mask, click_point)
+
+        # Finally, resize to (1024, 1024)
+        image = cv2.resize(image, (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_LINEAR)
+        mask = cv2.resize(mask, (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_NEAREST)
+
+        # Adjust click_point accordingly
+        h, w = image.shape[:2]
+        h_orig, w_orig = sample['image'].shape[:2]
+        scale_x = self.img_output_size / w
+        scale_y = self.img_output_size / h
+        click_point = (int(click_point[0] * scale_x), int(click_point[1] * scale_y))
+
+        # Ensure click_point is within image bounds
+        click_point = self.adjust_click_point(click_point, image.shape)
+
+        sample['image'] = image
+        sample['mask'] = mask
+        sample['click_point'] = click_point
+        return sample
+
+    def random_scale(self, image, mask, click_point):
+        h, w = image.shape[:2]
+        scale = random.uniform(0.5, 2.0)
+        new_h, new_w = int(h * scale), int(w * scale)
+        image_scaled = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        mask_scaled = cv2.resize(mask, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+        click_point_scaled = (int(click_point[0] * scale), int(click_point[1] * scale))
+        return image_scaled, mask_scaled, click_point_scaled
+
+    def random_rotation(self, image, mask, click_point):
+        angle = random.uniform(-30, 30)
+        h, w = image.shape[:2]
+        center = (w / 2, h / 2)
+        rot_mat = cv2.getRotationMatrix2D(center, angle, 1.0)
+        image_rotated = cv2.warpAffine(image, rot_mat, (w, h), flags=cv2.INTER_LINEAR)
+        mask_rotated = cv2.warpAffine(mask, rot_mat, (w, h), flags=cv2.INTER_NEAREST)
+        click_point_arr = np.array([click_point[0], click_point[1], 1])
+        click_point_rotated = rot_mat.dot(click_point_arr)
+        click_point_rotated = (int(click_point_rotated[0]), int(click_point_rotated[1]))
+        return image_rotated, mask_rotated, click_point_rotated
+
+    def random_flip(self, image, mask, click_point):
+        h, w = image.shape[:2]
+        if random.random() < 0.5:
+            image = cv2.flip(image, 1)
+            mask = cv2.flip(mask, 1)
+            click_point = (w - click_point[0], click_point[1])
+        if random.random() < 0.5:
+            image = cv2.flip(image, 0)
+            mask = cv2.flip(mask, 0)
+            click_point = (click_point[0], h - click_point[1])
+        return image, mask, click_point
+
+    def random_crop(self, image, mask, click_point):
+        h, w = image.shape[:2]
+        crop_h, crop_w = self.img_output_size, self.img_output_size
+        if h <= crop_h or w <= crop_w:
+            # If the image is smaller than the crop size, pad it
+            pad_h = max(0, crop_h - h)
+            pad_w = max(0, crop_w - w)
+            image = cv2.copyMakeBorder(image, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            mask = cv2.copyMakeBorder(mask, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=0)
+            h, w = image.shape[:2]
+        x = random.randint(0, w - crop_w)
+        y = random.randint(0, h - crop_h)
+        image_cropped = image[y:y+crop_h, x:x+crop_w]
+        mask_cropped = mask[y:y+crop_h, x:x+crop_w]
+        click_point_cropped = (click_point[0] - x, click_point[1] - y)
+        return image_cropped, mask_cropped, click_point_cropped
+
+    def adjust_click_point(self, click_point, image_shape):
+        x, y = click_point
+        h, w = image_shape[:2]
+        x = max(0, min(x, w - 1))
+        y = max(0, min(y, h - 1))
+        return (x, y)

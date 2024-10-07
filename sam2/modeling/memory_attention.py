@@ -161,7 +161,7 @@ class MemoryAttention(nn.Module):
             )
         normed_output = self.norm(output)
 
-        if self.batch_first:
+        if self.batch_first: # 这里其实比较奇怪，会把长度放在最前面
             # Convert back to seq first
             normed_output = normed_output.transpose(0, 1)
             curr_pos = curr_pos.transpose(0, 1)
