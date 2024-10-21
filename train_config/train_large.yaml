@@ -1,17 +1,21 @@
 model:
   model_config: "sam2_hiera_l.yaml"
-  pretrain_model_path: "/home/zly/multi_ob/segment-anything-2/checkpoints/sam2_hiera_large.pt"
+  # pretrain_model_path: "/home/zly/multi_ob/segment-anything-2/checkpoints/sam2_hiera_large.pt"
+  # pretrain_model_path: "/data2/zly/training/2024-10-10-20-37/model_epoch_9.pth"
+  pretrain_model_path: "/data2/zly/training/2024-10-14-18-02/model_epoch_10.pth"
 train:
   learning_rate: 2e-5
-  num_epochs: 8
+  num_epochs: 15
   save_path: '/data2/zly/training/'
-  batch_size_one_gpu: 6
-  validate_first: True
+  batch_size_one_gpu: 4
+  validate_first: False
   num_workers_dataloader: 8
-  transfer_image_in_dataset: True
+
+  
+  transfer_image_in_dataset_use_sam2: True
 log:
   tensorboard_log_dir: './logs_tensorboard'
-  loguru_log_file: './logs/train/training_cuda1.log'
+  loguru_log_file: './logs/train/training_cuda0.log'
   log_interval: 12
   exp_name: "sam2_large"
 dataset:

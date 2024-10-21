@@ -447,7 +447,7 @@ class Trainer:
     def is_intermediate_val_epoch(self, epoch):
         return epoch % self.val_epoch_freq == 0 and epoch < self.max_epochs - 1
 
-    def _step(
+    def _step( ## 这里是真的训练的函数
         self,
         batch: BatchedVideoDatapoint,
         model: nn.Module,

@@ -90,11 +90,39 @@ def build_sam2(
     cfg = compose(config_name=config_file, overrides=hydra_overrides_extra)
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)
-    _load_checkpoint(model, ckpt_path)
+    missing_keys, unexpected_keys =_load_checkpoint(model, ckpt_path)
     model = model.to(device)
     if mode == "eval":
         model.eval()
     return model
+
+def build_sam2_for_self_train(
+    config_file,
+    ckpt_path=None,
+    device="cuda",
+    mode="eval",
+    hydra_overrides_extra=[],
+    apply_postprocessing=True,
+    **kwargs,
+):
+
+    if apply_postprocessing:
+        hydra_overrides_extra = hydra_overrides_extra.copy()
+        hydra_overrides_extra += [
+            # dynamically fall back to multi-mask if the single mask is not stable
+            "++model.sam_mask_decoder_extra_args.dynamic_multimask_via_stability=true",
+            "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_delta=0.05",
+            "++model.sam_mask_decoder_extra_args.dynamic_multimask_stability_thresh=0.98",
+        ]
+    # Read config and init model
+    cfg = compose(config_name=config_file, overrides=hydra_overrides_extra)
+    OmegaConf.resolve(cfg)
+    model = instantiate(cfg.model, _recursive_=True)
+    missing_keys, unexpected_keys =_load_checkpoint(model, ckpt_path)
+    model = model.to(device)
+    if mode == "eval":
+        model.eval()
+    return model, missing_keys, unexpected_keys
 
 
 def build_sam2_video_predictor(
@@ -127,7 +155,7 @@ def build_sam2_video_predictor(
     cfg = compose(config_name=config_file, overrides=hydra_overrides)
     OmegaConf.resolve(cfg)
     model = instantiate(cfg.model, _recursive_=True)
-    _load_checkpoint(model, ckpt_path)
+    missing_keys, unexpected_keys = _load_checkpoint(model, ckpt_path)
     model = model.to(device)
     if mode == "eval":
         model.eval()
@@ -156,12 +184,22 @@ def build_sam2_video_predictor_hf(model_id, **kwargs):
 
 def _load_checkpoint(model, ckpt_path):
     if ckpt_path is not None:
-        sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)["model"]
-        missing_keys, unexpected_keys = model.load_state_dict(sd)
+        sd = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(sd, dict):
+            # 尝试从字典中获取 key 'model'
+            if "model" in sd:
+                sd = sd["model"]
+            else:
+                logging.warning("Checkpoint is a dictionary but does not contain 'model' key.")
+        else:
+            logging.warning("Checkpoint is not a dictionary, assuming it's directly the model's state_dict.")
+         # Load the state_dict with strict=False to ignore missing/unexpected keys
+        missing_keys, unexpected_keys = model.load_state_dict(sd, strict=False)
+        
+        # Log missing and unexpected keys if any
         if missing_keys:
-            logging.error(missing_keys)
-            raise RuntimeError()
+            logging.warning(f"Missing keys in state_dict: {missing_keys}")
         if unexpected_keys:
-            logging.error(unexpected_keys)
-            raise RuntimeError()
+            logging.warning(f"Unexpected keys in state_dict: {unexpected_keys}")
         logging.info("Loaded checkpoint sucessfully")
+        return missing_keys, unexpected_keys

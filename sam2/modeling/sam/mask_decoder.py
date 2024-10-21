@@ -106,6 +106,8 @@ class MaskDecoder(nn.Module):
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
+        self.person_classifier_mlp = MLP(transformer_dim, transformer_dim, 1, 3)
+        self.person_classifier_token  = nn.Embedding(1,transformer_dim)
 
     def forward(
         self,
@@ -133,7 +135,7 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits,person_logits = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
@@ -146,11 +148,14 @@ class MaskDecoder(nn.Module):
         if multimask_output:
             masks = masks[:, 1:, :, :]
             iou_pred = iou_pred[:, 1:]
+            person_logits = person_logits[:,1:]
         elif self.dynamic_multimask_via_stability and not self.training:
             masks, iou_pred = self._dynamic_multimask_via_stability(masks, iou_pred)
+            person_logits = person_logits[:,0:1]
         else:
             masks = masks[:, 0:1, :, :]
             iou_pred = iou_pred[:, 0:1]
+            person_logits = person_logits[:,0:1]
 
         if multimask_output and self.use_multimask_token_for_obj_ptr:
             sam_tokens_out = mask_tokens_out[:, 1:]  # [b, 3, c] shape
@@ -163,13 +168,13 @@ class MaskDecoder(nn.Module):
             sam_tokens_out = mask_tokens_out[:, 0:1]  # [b, 1, c] shape
 
         # Prepare output
-        return masks, iou_pred, sam_tokens_out, object_score_logits
+        return masks, iou_pred, sam_tokens_out, object_score_logits, person_logits
 
     def predict_masks(
         self,
-        image_embeddings: torch.Tensor,
-        image_pe: torch.Tensor,
-        sparse_prompt_embeddings: torch.Tensor,
+        image_embeddings: torch.Tensor, #[b,256,64,64]
+        image_pe: torch.Tensor, #[1,256,64,64]
+        sparse_prompt_embeddings: torch.Tensor,#[b,2,256]
         dense_prompt_embeddings: torch.Tensor,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
@@ -183,13 +188,14 @@ class MaskDecoder(nn.Module):
                     self.obj_score_token.weight,
                     self.iou_token.weight,
                     self.mask_tokens.weight,
+                    self.person_classifier_token.weight,
                 ],
                 dim=0,
             )
             s = 1
         else:
             output_tokens = torch.cat(
-                [self.iou_token.weight, self.mask_tokens.weight], dim=0
+                [self.iou_token.weight, self.mask_tokens.weight,self.person_classifier_token.weight], dim=0
             )
         output_tokens = output_tokens.unsqueeze(0).expand(
             sparse_prompt_embeddings.size(0), -1, -1
@@ -213,6 +219,7 @@ class MaskDecoder(nn.Module):
         hs, src = self.transformer(src, pos_src, tokens)
         iou_token_out = hs[:, s, :]
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
+        person_class_token = hs[:,s + 1 + self.num_mask_tokens,1]
 
         # Upscale mask embeddings and predict masks using the mask tokens
         src = src.transpose(1, 2).view(b, c, h, w)
@@ -222,7 +229,7 @@ class MaskDecoder(nn.Module):
             dc1, ln1, act1, dc2, act2 = self.output_upscaling
             feat_s0, feat_s1 = high_res_features
             upscaled_embedding = act1(ln1(dc1(src) + feat_s1))
-            upscaled_embedding = act2(dc2(upscaled_embedding) + feat_s0)
+            upscaled_embedding = act2(dc2(upscaled_embedding) + feat_s0) # updascaled_embedding [b,32,256,256] 转置卷积
 
         hyper_in_list: List[torch.Tensor] = []
         for i in range(self.num_mask_tokens):
@@ -231,7 +238,7 @@ class MaskDecoder(nn.Module):
             )
         hyper_in = torch.stack(hyper_in_list, dim=1)
         b, c, h, w = upscaled_embedding.shape
-        masks = (hyper_in @ upscaled_embedding.view(b, c, h * w)).view(b, -1, h, w)
+        masks = (hyper_in @ upscaled_embedding.view(b, c, h * w)).view(b, -1, h, w) #[b,num_mask+1,256,256]
 
         # Generate mask quality predictions
         iou_pred = self.iou_prediction_head(iou_token_out)
@@ -241,8 +248,8 @@ class MaskDecoder(nn.Module):
         else:
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
-
-        return masks, iou_pred, mask_tokens_out, object_score_logits
+        person_logits = self.person_classifier_mlp(person_class_token) 
+        return masks, iou_pred, mask_tokens_out, object_score_logits, person_logits
 
     def _get_stability_scores(self, mask_logits):
         """

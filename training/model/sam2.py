@@ -104,7 +104,7 @@ class SAM2Train(SAM2Base):
             for p in self.image_encoder.parameters():
                 p.requires_grad = False
 
-    def forward(self, input: BatchedVideoDatapoint):
+    def forward(self, input: BatchedVideoDatapoint): ## 这里决定是image训练还是视频训练
         if self.training or not self.forward_backbone_per_frame_for_eval:
             # precompute image features on all frames before tracking
             backbone_out = self.forward_image(input.flat_img_batch)

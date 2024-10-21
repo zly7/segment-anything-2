@@ -41,6 +41,8 @@ def dice_loss(inputs, targets, num_objects, loss_on_multimask=False):
         numerator = 2 * (inputs * targets).sum(-1)
     else:
         inputs = inputs.flatten(1)
+        if targets.dim() != 2: # 这里主要针对multimask进行处理
+            targets = targets.flatten(1)
         numerator = 2 * (inputs * targets).sum(1)
     denominator = inputs.sum(-1) + targets.sum(-1)
     loss = 1 - (numerator + 1) / (denominator + 1)
