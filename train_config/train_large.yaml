@@ -1,27 +1,43 @@
 model:
   model_config: "sam2_hiera_l.yaml"
-  # pretrain_model_path: "/home/zly/multi_ob/segment-anything-2/checkpoints/sam2_hiera_large.pt"
+  # pretrain_model_path: "/data2/zly/training/2024-10-21-19-20/model_epoch_3.pth"
+  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
   # pretrain_model_path: "/data2/zly/training/2024-10-10-20-37/model_epoch_9.pth"
-  pretrain_model_path: "/data2/zly/training/2024-10-14-18-02/model_epoch_10.pth"
+  # pretrain_model_path: "/data2/zly/training/2024-10-14-18-02/model_epoch_10.pth"
+  pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
+  # pretrain_model_path: "/data2/zly/training/2024-10-24-20-14/model_epoch_5.pth"
 train:
-  learning_rate: 2e-5
-  num_epochs: 15
+  learning_rate: 5e-6
+  num_epochs: 5
   save_path: '/data2/zly/training/'
   batch_size_one_gpu: 4
-  validate_first: False
-  num_workers_dataloader: 8
-
-  
+  validate_first: True
+  num_workers_dataloader: 16
   transfer_image_in_dataset_use_sam2: True
 log:
   tensorboard_log_dir: './logs_tensorboard'
-  loguru_log_file: './logs/train/training_cuda0.log'
+  loguru_log_file: './logs/train/training_cuda_hq.log'
   log_interval: 12
   exp_name: "sam2_large"
 dataset:
-  train_dataloader: MOTS
-  train_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
-  val_dataloader: MOTS
-  val_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
-  test_dataloader: MOTS
-  test_dataset_root_path: "/data2/zly/mots_data/MOTS2020/test"
+  # train_dataloader: MOTS
+  # train_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
+  # val_dataloader: MOTS
+  # val_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
+  # test_dataloader: MOTS
+  # test_dataset_root_path: "/data2/zly/mots_data/MOTS2020/test"
+  # train_dataloader: openimagev7
+  # train_dataset_root_path: "/data2/zly/OIv7/OIv7coco/data"
+  # train_annotation_file: "/data2/zly/OIv7/OIv7coco/labels.json"
+  # val_dataloader: openimagev7
+  # val_dataset_root_path: "/data2/zly/OIv7/OIv7coco/data"
+  # val_annotation_file: "/data2/zly/OIv7/OIv7coco/labels.json"
+  train_dataloader: samacoco
+  train_dataset_root_path:   "/data3/zly/samacoco/samacocoperson/data"
+  train_annotation_file:     "/data3/zly/samacoco/samacocoperson/labels.json"
+  val_dataloader: samacoco
+  val_dataset_root_path:     "/data3/zly/samacoco/samacocoperson_valid/data"
+  val_annotation_file:       "/data3/zly/samacoco/samacocoperson_valid/labels.json"
+  val_length: -1
+test:
+  use_hq: True

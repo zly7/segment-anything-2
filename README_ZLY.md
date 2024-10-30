@@ -38,4 +38,14 @@ python run_sam2_no_overlap.py --dataset MTMMC --split val --step_num 10 --vis Fa
 torchrun --nproc_per_node=2 trainer_ddp.py --config_path ./train_config/train_large.yaml
 python3 trainer_ddp.py --config_path ./train_config/train_large.yaml
 
-python3 trainer_ddp.py --local_rank 0 --device_index 1 --config_path ./train_config/train_large.yaml
+python3 ./pedestrainSAM/trainer_ddp.py --local_rank 0 --device_index 1 --config_path ./train_config/train_large.yaml
+
+python3 -m pedestrainSAM.test_ochuman
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.test_ochuman
+
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.test_ochuman_optimu
+
+
+## 启动optuna 可视化网站
+optuna-dashboard sqlite:///optuna_study.db
+

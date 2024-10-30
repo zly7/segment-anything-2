@@ -32,7 +32,9 @@ import numpy as np
 import torch
 from torchvision.ops.boxes import batched_nms  # type: ignore
 from typing import Any, Dict, List, Optional, Tuple
-
+'''
+弃用的类
+'''
 class PedestrianSAM2AutomaticMaskGenerator:
     def __init__(
         self,

@@ -5,6 +5,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
+import time
 from PIL import Image
 import numpy as np
 import torch
@@ -59,7 +60,8 @@ class PedestrainSamAutomaticMaskGenerator:
         person_probability_thresh: float = 0.7,
         vis: bool = False,
         vis_immediate_folder = "pred_images",
-        loguru_path: str = "./"
+        loguru_path: str = "./",
+        use_hq = False,
     ) -> None:
         """
         Using a SAM model, generates masks for the entire image.
@@ -149,6 +151,7 @@ class PedestrainSamAutomaticMaskGenerator:
         self.person_probability_thresh = person_probability_thresh
         self.vis = vis
         self.vis_immediate_folder = vis_immediate_folder
+        self.use_hq = use_hq
         logger.add(loguru_path, rotation="1 day", retention="7 days", level="DEBUG")
 
     @torch.no_grad()
@@ -335,6 +338,9 @@ class PedestrainSamAutomaticMaskGenerator:
         cropped_image: Optional[np.ndarray] = None,
         image_path: Optional[str] = None,
     ) -> MaskData:
+        '''
+        默认返回是0/1的
+        '''
         orig_h, orig_w = orig_size
 
         # Run model on this batch
@@ -342,48 +348,47 @@ class PedestrainSamAutomaticMaskGenerator:
             point_coords=transformed_points[:, None, :],
             point_labels=labels[:, None],
             sparse_embeddings=sparse_embeddings,
-            dense_embeddings=dense_embeddings
+            dense_embeddings=dense_embeddings,
+            predict_logit=True,
+            use_hq=self.use_hq,
         )        
         sigmoid_person_logits = torch.sigmoid(person_logits.flatten(0, 1))
         data = MaskData(
-            masks=prd_masks.flatten(0, 1),
+            masks=prd_masks.flatten(0, 1), # 融合前两维度
             iou_preds=iou_preds.flatten(0, 1),
             person_logits=sigmoid_person_logits,  # Store person_logits
             points=points.repeat_interleave(prd_masks.shape[1], dim=0),
         )
         del prd_masks
-            
+        data["stability_score"] = calculate_stability_score(
+            data["masks"], self.predictor._transforms.mask_threshold, self.stability_score_offset
+        )
+        # Importantly, we threshold the masks here
+        data["masks"] = data["masks"] > self.predictor._transforms.mask_threshold
         # Filter by person logits
-        if self.person_probability_thresh > 0.0:
-            keep_person = data["person_logits"] >= self.person_probability_thresh
-            data.filter(keep_person)
-        # Visualization after person logits filtering
+        keep_person = data["person_logits"] >= self.person_probability_thresh
+        data.filter(keep_person)
+        logger.info(f"经过人概率大于{self.person_probability_thresh}筛选,剩下{len(data["masks"])}个")
+        # Filter by predicted IoU
+        keep_mask = data["iou_preds"] > self.pred_iou_thresh
+        data.filter(keep_mask)
+        logger.info(f"经过预测分数大于{self.pred_iou_thresh}筛选,剩下{len(data["masks"])}个")
+        # Filter stability score
+        keep_mask = data["stability_score"] >= self.stability_score_thresh
+        data.filter(keep_mask)
+        logger.info(f"经过稳定性大于{self.stability_score_thresh}筛选,剩下{len(data["masks"])}个")
+        data["boxes"] = batched_mask_to_box(data["masks"])
         if self.vis:
+            start_time = time.time()
             self.visualize_masks(
                 data["masks"],
                 data["iou_preds"],
                 data["person_logits"],
+                data["stability_score"],  # Pass stability_score here
                 cropped_image,
                 image_path,
             )
-        logger.info(f"经过人概率大于{self.person_probability_thresh}筛选,剩下{len(data["masks"])}个")
-        # Filter by predicted IoU
-        if self.pred_iou_thresh > 0.0:
-            keep_mask = data["iou_preds"] > self.pred_iou_thresh
-            data.filter(keep_mask)
-
-        # Calculate stability score
-        data["stability_score"] = calculate_stability_score(
-            data["masks"], self.predictor._transforms.mask_threshold, self.stability_score_offset
-        )
-        if self.stability_score_thresh > 0.0:
-            keep_mask = data["stability_score"] >= self.stability_score_thresh
-            data.filter(keep_mask)
-
-        # Threshold masks and calculate boxes
-        data["masks"] = data["masks"] > self.predictor._transforms.mask_threshold
-        data["boxes"] = batched_mask_to_box(data["masks"])
-
+            logger.info(f"可视化耗时: {time.time() - start_time:.2f}s")
         # Filter boxes that touch crop boundaries
         keep_mask = ~is_box_near_crop_edge(data["boxes"], crop_box, [0, 0, orig_w, orig_h])
         if not torch.all(keep_mask):
@@ -449,11 +454,17 @@ class PedestrainSamAutomaticMaskGenerator:
     
     @staticmethod
     def overlay_mask_on_image(
-        image: Image.Image, mask: np.ndarray, iou_pred: float, person_logit: float, font: ImageFont.ImageFont
+        image: Image.Image,
+        mask: np.ndarray,
+        iou_pred: float,
+        person_logit: float,
+        stability_score: float,  # New parameter
+        font: ImageFont.ImageFont
     ) -> Image.Image:
-        # Create a color mask
+        # Create a color mask with transparency
         color = tuple(np.random.randint(0, 256, size=3).tolist()) + (128,)
         colored_mask = Image.new("RGBA", image.size, color)
+        
         # Convert mask to PIL Image
         mask_pil = Image.fromarray((mask * 255).astype(np.uint8)).resize(image.size, resample=Image.NEAREST)
         mask_pil = mask_pil.convert("L")
@@ -461,10 +472,17 @@ class PedestrainSamAutomaticMaskGenerator:
 
         # Composite the mask onto the image
         overlay = Image.alpha_composite(image.convert("RGBA"), colored_mask)
+        
         # Draw text
         draw = ImageDraw.Draw(overlay)
-        text = f"iou_pred: {iou_pred:.2f}, person_logit: {person_logit:.2f}"
-        draw.text((10, 10), text, fill=(255, 255, 255, 255), font=font)
+        text_line1 = f"iou_pred: {iou_pred:.2f}, person_logit: {person_logit:.2f}"
+        text_line2 = f"stability_score: {stability_score:.2f}"
+        
+        x, y = 10, 10
+        line_spacing = 20
+        draw.text((x, y), text_line1, fill=(255, 0, 0, 255), font=font)
+        draw.text((x, y + line_spacing), text_line2, fill=(255, 0, 0, 255), font=font)
+        
         return overlay
 
     
@@ -473,10 +491,10 @@ class PedestrainSamAutomaticMaskGenerator:
         masks: torch.Tensor,
         iou_preds: torch.Tensor,
         person_logits: torch.Tensor,
+        stability_scores: torch.Tensor,  # Assuming stability_score is per mask
         cropped_image: np.ndarray,
         image_path: str,
     ) -> None:
-        # Ensure the visualization only happens when self.vis is True
         # Convert cropped_image to PIL Image
         image = Image.fromarray(cropped_image)
         font_path = "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf"
@@ -484,22 +502,32 @@ class PedestrainSamAutomaticMaskGenerator:
 
         # Get save directory and base filename
         save_dir, base_filename = self.get_save_dir_and_base_filename(image_path)
-        os.makedirs(os.path.join(save_dir,"person"), exist_ok=True)
-        os.makedirs(os.path.join(save_dir,"others"), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, "person"), exist_ok=True)
+        os.makedirs(os.path.join(save_dir, "others"), exist_ok=True)
 
         # Iterate over each mask
         for idx in range(masks.shape[0]):
             mask = masks[idx].cpu().numpy()
             iou_pred = iou_preds[idx].item()
             person_logit = person_logits[idx].item()
+            stability_score = stability_scores[idx].item()  # Get stability_score for this mask
 
-            # Overlay mask on image
-            overlay = self.overlay_mask_on_image(image, mask, iou_pred, person_logit, font)
-            immediate_dir = "person" if person_logit > 0 else "others"
+            # Overlay mask on image with stability_score
+            overlay = self.overlay_mask_on_image(image, mask, iou_pred, person_logit, stability_score, font)
+            immediate_dir = "person" if person_logit > self.person_probability_thresh else "others"
+            
             # Save the image
             save_path = os.path.join(save_dir, immediate_dir, f"{idx}.jpg")
             overlay = overlay.convert("RGB")
             overlay.save(save_path)
+            
+            # Convert mask to black and white image
+            mask_pil = Image.fromarray((mask * 255).astype(np.uint8)).resize(image.size, resample=Image.NEAREST)
+            mask_pil = mask_pil.convert("L")
+
+            # Save the mask image
+            mask_save_path = os.path.join(save_dir, immediate_dir, f"{idx}_mask.jpg")
+            mask_pil.save(mask_save_path)
     
     def combine_masks(
         self,

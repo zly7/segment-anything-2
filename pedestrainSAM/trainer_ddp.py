@@ -1,3 +1,4 @@
+import math
 import os
 import shutil
 import time
@@ -16,12 +17,13 @@ from sam2.build_sam import build_sam2, build_sam2_for_self_train
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.utils.transforms import SAM2Transforms
 from typing import Optional
-from dataset_mots import MOTSDataset
+from dataset_zly import MOTSDataset
+from dataset_zly import COCOPersonDataset
 from PIL import Image, ImageDraw, ImageFont
-# Ensure that your custom modules are properly imported
-# from dataset_mots import MOTSDataset
 from training.loss_fns import sigmoid_focal_loss, dice_loss, iou_loss
 from typing import Union
+from torchvision import transforms as torch_transforms  # 导入 torchvision 的 transforms 模块
+
 class PedestrainSAM2(nn.Module):
     def __init__(
         self,
@@ -49,7 +51,7 @@ class PedestrainSAM2(nn.Module):
 
     def forward(self, image, point_coords, point_labels):
         """
-        image tensor: (B, 3, H, W)
+        image tensor: (B, 3, H, W) (B,3,1024,1024)
         points_coords: (B, N, 2)
         point_labels: (B, N)
         """
@@ -81,6 +83,7 @@ class PedestrainSAM2(nn.Module):
             multimask_output=False,
             repeat_image=False,
             high_res_features=high_res_features,
+            use_hq = True,
         )
         if len(person_logits.size()) == 3 and person_logits.size(1) == 1:
             person_logits = person_logits.squeeze(1)
@@ -175,6 +178,8 @@ class PedestrainSAM2(nn.Module):
         point_labels,
         sparse_embeddings=None,
         dense_embeddings=None,
+        predict_logit = False,
+        use_hq = False,
     ):
         """
         Predict masks for the given prompts.
@@ -213,12 +218,15 @@ class PedestrainSAM2(nn.Module):
             multimask_output=False,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
+            use_hq = use_hq,
+            
         )
         if len(person_logits.size()) == 3 and person_logits.size(1) == 1:
             person_logits = person_logits.squeeze(1)
         low_res_masks_logits = torch.clamp(low_res_masks_logits, -32.0, 32.0)
         prd_masks = self._transforms.postprocess_masks(low_res_masks_logits, self._orig_hw[-1])
-
+        if predict_logit == False:
+            prd_masks = prd_masks > self._transforms.mask_threshold
         return prd_masks, iou_predictions, person_logits, low_res_masks_logits
 
 
@@ -306,7 +314,7 @@ class Trainer:
         other_params = []
         
         for name, param in self.model.named_parameters():
-            if name in missing_keys_params:  # Check if parameter name is in missing keys
+            if name in missing_keys:
                 logger.info(f"{name} params is registered as missing_key_params_list")
                 missing_keys_params.append(param)
             else:
@@ -314,9 +322,16 @@ class Trainer:
         for param in other_params:
             param.requires_grad = False
         param_groups = [
-            {"params": filter(lambda p: p.requires_grad, missing_keys_params), "lr": float(config["train"]["learning_rate"]) * 10},  # 10倍学习率
+            {"params": list(filter(lambda p: p.requires_grad, missing_keys_params)), "lr": float(config["train"]["learning_rate"]) * 10},  # 10倍学习率
             # {"params": filter(lambda p: p.requires_grad, other_params), "lr": float(config["train"]["learning_rate"])},  # 默认学习率
         ]
+        # Now print the param_groups for inspection
+        for i, group in enumerate(param_groups):
+            logger.info(f"Param group {i}:")
+            logger.info(f"Learning rate: {group['lr']}")
+            logger.info(f"Number of params: {len(group['params'])}")
+            for param in group['params']:
+                logger.info(f"Param shape: {param.shape}, requires_grad: {param.requires_grad}")
         # Define optimizer
         self.optimizer = optim.AdamW(
             param_groups,
@@ -370,7 +385,7 @@ class Trainer:
                         batch[k] = v.to(self.device, non_blocking=True)
                 images = batch["image"] # B, 3, 1024,1024  一般情况下是已经resize成1024的,在数据集就已经SAM2_transform
                 gt_masks = batch["mask"]  # (B, 1024, 1024)
-                click_points = batch["click_point"]  # (B, N, 2) 2014的坐标
+                click_points = batch["click_point"]  # (B, N, 2) 1024的绝对坐标
                 point_labels = batch["point_label"]  # (B, N)
                 is_person_labels = batch["is_person"]  # (B, 1)
                 # Zero gradients
@@ -392,7 +407,7 @@ class Trainer:
                         mask_loss = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
 
                     loss = mask_loss + person_loss
-
+                    # loss = person_loss
                 # Backward and optimize
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
@@ -470,6 +485,8 @@ class Trainer:
         val_person_loss = 0.0
         start_time = time.time()
         total_batches = len(self.val_loader)
+        is_person_labels_num = 0
+        not_person_labels_num = 0
         with torch.no_grad():
             for batch_idx, batch in enumerate(self.val_loader):
                 # Move data to device
@@ -513,7 +530,7 @@ class Trainer:
 
                 for i in range(b):
                     img_path = image_paths[i]
-                    original_image = Image.open(img_path).convert('RGB')
+                    original_image = images[i]  #changed: Use augmented image
                     output_mask = (outputs[i] > 0.0).cpu().numpy().squeeze()
                     gt_mask = gt_masks[i].cpu().numpy().squeeze()
                     click_pts = click_points[i]
@@ -524,9 +541,11 @@ class Trainer:
 
                     # Call the helper function with the predicted person label
                     self.save_image_and_masks(
-                        img_path, original_image, output_mask, gt_mask, click_pts, point_lbls, whether_person, pred_person_label, epoch, track_id
+                        img_path, original_image, output_mask, gt_mask, click_pts, point_lbls, whether_person,
+                            pred_person_label, epoch, track_id
                     )
-
+                is_person_labels_num += is_person_labels.sum().item()
+                not_person_labels_num += (1 - is_person_labels).sum().item()
                 if (batch_idx + 1) % 10 == 0:
                     elapsed_time = time.time() - start_time
                     batches_remaining = total_batches - (batch_idx + 1)
@@ -538,6 +557,7 @@ class Trainer:
                         f"Processed {batch_idx + 1}/{total_batches} batches. "
                         f"Elapsed Time: {elapsed_time:.2f} seconds, "
                         f"Estimated Remaining Time: {estimated_remaining_time:.2f} seconds."
+                        f"Person Labels Num: {is_person_labels_num}, Not Person Labels Num: {not_person_labels_num}"
                     )
 
         # Compute average losses
@@ -580,7 +600,33 @@ class Trainer:
         blended = Image.alpha_composite(original_image_rgba, mask_rgba)
         return blended
 
+        
     def draw_click_points(self, image, click_points, point_labels, person_class, image_size):
+        def draw_star(draw, center, size, fill, outline=None, width=5):
+            """
+            绘制五角星
+            :param draw: ImageDraw 对象
+            :param center: 五角星中心 (x, y)
+            :param size: 五角星大小（半径）
+            :param fill: 填充颜色
+            :param outline: 描边颜色
+            :param width: 描边宽度
+            """
+            x, y = center
+            points = []
+            num_points = 5
+            angle = math.pi / 2  # 起始角度，五角星朝上
+            for i in range(num_points * 2):
+                radius = size if i % 2 == 0 else size / 2
+                theta = angle + i * (math.pi / num_points)
+                px = x + radius * math.cos(theta)
+                py = y - radius * math.sin(theta)
+                points.append((px, py))
+            draw.polygon(points, fill=fill, outline=outline)
+            if outline:
+                draw.line(points + [points[0]], fill=outline, width=width)
+        
+        
         draw = ImageDraw.Draw(image)
         orig_w, orig_h = image_size
         # Assuming images are resized to (1024, 1024) during preprocessing
@@ -602,18 +648,28 @@ class Trainer:
 
             if label > 0:
                 # Positive click: draw circle
-                radius = 5
-                draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+                size = 16  # 增大尺寸
+                draw_star(draw, (x, y), size, fill=color, outline='red', width=2)
             else:
                 # Negative click: draw cross
-                size = 5
+                size = 15
                 draw.line((x - size, y - size, x + size, y + size), fill=color, width=2)
                 draw.line((x - size, y + size, x + size, y - size), fill=color, width=2)
         return image
     
-    def save_image_and_masks(self, img_path, original_image, output_mask, gt_mask, click_points, 
+    def save_image_and_masks(self, img_path, original_image: torch.tensor, output_mask:np.ndarray, gt_mask:np.ndarray, click_points, 
                              point_labels, person_class, pred_person_label, epoch, track_id):
-        # Compute paths
+        mean = [0.485, 0.456, 0.406]
+        std = [0.229, 0.224, 0.225]
+        
+        # Reverse normalization  original_image
+        unnormalized_tensor = original_image.clone()
+        if unnormalized_tensor.is_cuda:
+            unnormalized_tensor = unnormalized_tensor.cpu()
+        for t, m, s in zip(unnormalized_tensor, mean, std):
+            t.mul_(s).add_(m)
+        unnormalized_tensor = torch.clamp(unnormalized_tensor, 0, 1)
+        original_image = torch_transforms.ToPILImage()(unnormalized_tensor)
         last_three_parts = os.path.join(*img_path.split(os.sep)[-3:])  # e.g., 'MOTS20-09/img1/000426.jpg'
         save_dir = os.path.join(self.validate_save_path, str(epoch+1), os.path.dirname(last_three_parts))
         os.makedirs(save_dir, exist_ok=True)
@@ -621,6 +677,13 @@ class Trainer:
         # Save original image
         save_img_path = os.path.join(self.validate_save_path, str(epoch+1), last_three_parts)
         original_image.save(save_img_path)
+        
+        image_before_augment = Image.open(img_path)
+        image_before_augment.save(os.path.join(
+            self.validate_save_path,
+            str(epoch+1),
+            os.path.splitext(last_three_parts)[0]+ f'_before_augment.jpg'
+        ))
 
         # Resize masks to original image size
         # Predicted mask
@@ -743,10 +806,22 @@ def main():
             root_path=config["dataset"]["train_dataset_root_path"], use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
             augment=False, enable_negative_sample=True
         )
+    elif "v7" in config["dataset"]["train_dataloader"] or "coco" in config["dataset"]["train_dataloader"]:
+        train_dataset = COCOPersonDataset(images_dir=config["dataset"]["train_dataset_root_path"],
+            annotation_file=config["dataset"]["train_annotation_file"],
+            use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
+            augment=True, enable_negative_sample=True
+        )
     if config["dataset"]["val_dataloader"] == "MOTS":
         val_dataset = MOTSDataset(
             root_path=config["dataset"]["val_dataset_root_path"], use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
-            augment=False, max_length_for_validate = 4096,enable_negative_sample=True
+            augment=True, max_length_for_validate = int(config["dataset"]["val_length"]),enable_negative_sample=True
+        )
+    elif "v7" in config["dataset"]["train_dataloader"] or "coco" in config["dataset"]["train_dataloader"]:
+        val_dataset = COCOPersonDataset(images_dir=config["dataset"]["val_dataset_root_path"],
+            annotation_file=config["dataset"]["val_annotation_file"],
+            use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
+            augment=True, max_length_for_validate = config["dataset"]["val_length"],enable_negative_sample=True
         )
 
     if world_size > 1:

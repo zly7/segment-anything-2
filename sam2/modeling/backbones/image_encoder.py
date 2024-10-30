@@ -104,7 +104,7 @@ class FpnNeck(nn.Module):
         out = [None] * len(self.convs)
         pos = [None] * len(self.convs)
         assert len(xs) == len(self.convs)
-        # fpn forward pass
+        # fpn forward pass 这里非常神奇，就是从后面再往上融合这个feature
         # see https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/backbone/fpn.py
         prev_features = None
         # forward in top-down order (from low to high resolution)

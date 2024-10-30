@@ -1,5 +1,6 @@
 from datetime import datetime
 import os
+import shutil
 import torch
 from tqdm import tqdm
 import yaml
@@ -10,7 +11,7 @@ from pycocotools.cocoeval import COCOeval
 
 from sam2.build_sam import build_sam2_for_self_train
 from .trainer_ddp import PedestrainSAM2
-from dataset_mots.dayasets_ochuman_test import OCHumanSegmentationTest  # Update the import path
+from dataset_zly.dayasets_ochuman_test import OCHumanSegmentationTest  # Update the import path
 from .automask_from_sam1 import PedestrainSamAutomaticMaskGenerator
 from pycocotools import mask as masks_utils
 def main():
@@ -45,15 +46,22 @@ def main():
     )
 
     # Paths to your OCHuman dataset
-    ann_file = "/data2/zly/CrowdSeg/OCHuman/ochuman_coco_format_test_range_0.00_1.00_full_labelled.json"  # Update with the actual path
+    # ann_file = "/data2/zly/CrowdSeg/OCHuman/ochuman_coco_format_test_range_0.00_1.00_full_labelled.json"  # Update with the actual path
+    ann_file = "/data2/zly/CrowdSeg/OCHuman/ochuman_coco_format_test_range_0.00_1.00.json"
     # ann_file = "/data2/zly/CrowdSeg/OCHuman/coco_annotation_first_10.json"
     img_dir = "/data2/zly/CrowdSeg/OCHuman/images"  # Update with the actual path
     current_datetime = datetime.now()
     current_date_str = current_datetime.date().strftime("%Y-%m-%d")
-    which_to_replace_img_dir = "pred_images_" + current_date_str
+    # which_to_replace_img_dir = "pred_images_" + current_date_str + "finetune_all_parameter"
+    which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test_no_filter"
     output_base_dir = img_dir.replace("images", which_to_replace_img_dir)
-    if not os.path.exists(output_base_dir):
-        os.makedirs(output_base_dir)
+    if os.path.exists(output_base_dir):
+        shutil.rmtree(os.path.join(output_base_dir,"code"))
+    if not os.path.exists(os.path.join(output_base_dir,"code")):
+        os.makedirs(os.path.join(output_base_dir,"code"))
+    shutil.copytree("./pedestrainSAM", os.path.join(output_base_dir,"code", "pedestrainSAM")) # 保存一些代码
+    shutil.copytree("./sam2", os.path.join(output_base_dir,"code", "sam2"))
+    shutil.copytree("./train_config", os.path.join(output_base_dir,"code", "train_config"))
     # Initialize the test dataset
     test_dataset = OCHumanSegmentationTest(
         ann_file=ann_file,
@@ -74,17 +82,18 @@ def main():
     # Initialize the mask generator
     mask_generator = PedestrainSamAutomaticMaskGenerator(
         model=pedestrian_sam2,
-        points_per_batch=32*32,  # Adjust based on your GPU memory
-        points_per_side=32, # 这里是perside
-        pred_iou_thresh=0.86,
-        stability_score_thresh=0.92,
+        points_per_batch=16*16,  # Adjust based on your GPU memory
+        points_per_side=16, # 这里是perside
+        pred_iou_thresh=0.7,
+        stability_score_thresh=0.8,
         crop_n_layers=0,
-        crop_n_points_downscale_factor=2,
+        crop_n_points_downscale_factor=2, # 0的时候不起作用
         min_mask_region_area=100,  # Requires OpenCV for post-processing
         person_probability_thresh=0.7,
         vis=True,  # Set to True if you want to save visualizations
         vis_immediate_folder=which_to_replace_img_dir,
-        loguru_path=f"./logs/ochuman_test/{current_date_str}.log"
+        loguru_path=f"./logs/ochuman_test/{current_date_str}.log",
+        use_hq = config["test"]["use_hq"],
     )
 
     # Load the ground truth annotations
