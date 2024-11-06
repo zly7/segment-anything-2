@@ -1,25 +1,36 @@
 model:
   model_config: "sam2_hiera_l.yaml"
   # pretrain_model_path: "/data2/zly/training/2024-10-21-19-20/model_epoch_3.pth"
-  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
-  # pretrain_model_path: "/data2/zly/training/2024-10-10-20-37/model_epoch_9.pth"
-  # pretrain_model_path: "/data2/zly/training/2024-10-14-18-02/model_epoch_10.pth"
   pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
-  # pretrain_model_path: "/data2/zly/training/2024-10-24-20-14/model_epoch_5.pth"
+  # pretrain_model_path: "/data2/zly/training/2024-10-31-21-45/model_epoch_1.pth"
+  # pretrain_model_path: "/data2/zly/training/2024-11-01-10-25/model_epoch_5.pth"
+  trainable_layers:
+    - "sam_mask_decoder.person_classifier_mlp.layers"
+    - "sam_mask_decoder.person_classifier_token"
+    - "sam_mask_decoder.hq_token"
+    - "sam_mask_decoder.hf_mlp.layers"
+    - "sam_mask_decoder.compress_feature_2"
+    - "sam_mask_decoder.compress_feature_1"
+    - "sam_mask_decoder.compress_feature_0"
 train:
-  learning_rate: 5e-6
-  num_epochs: 5
+  learning_rate: 1e-5
+  weight_decay: 0.1
+  warm_up_step: 1000
+  max_norm: 0.1
+  num_epochs: 26
   save_path: '/data2/zly/training/'
-  batch_size_one_gpu: 4
-  validate_first: True
+  batch_size_one_gpu: 32
+  validate_first: False
   num_workers_dataloader: 16
   transfer_image_in_dataset_use_sam2: True
+  valid_every_train_epoch: 2
+  continue_training: False
 log:
   tensorboard_log_dir: './logs_tensorboard'
-  loguru_log_file: './logs/train/training_cuda_hq.log'
-  log_interval: 12
+  loguru_log_file: './logs/train/training_cuda_data_mix.log'
+  log_interval_batch: 12
   exp_name: "sam2_large"
-dataset:
+
   # train_dataloader: MOTS
   # train_dataset_root_path: "/data2/zly/mots_data/MOTS2020/train"
   # val_dataloader: MOTS
@@ -32,12 +43,36 @@ dataset:
   # val_dataloader: openimagev7
   # val_dataset_root_path: "/data2/zly/OIv7/OIv7coco/data"
   # val_annotation_file: "/data2/zly/OIv7/OIv7coco/labels.json"
-  train_dataloader: samacoco
-  train_dataset_root_path:   "/data3/zly/samacoco/samacocoperson/data"
-  train_annotation_file:     "/data3/zly/samacoco/samacocoperson/labels.json"
-  val_dataloader: samacoco
-  val_dataset_root_path:     "/data3/zly/samacoco/samacocoperson_valid/data"
-  val_annotation_file:       "/data3/zly/samacoco/samacocoperson_valid/labels.json"
-  val_length: -1
+  # train_dataloader: samacoco
+  # train_dataset_root_path:   "/data3/zly/samacoco/samacocoperson/data"
+  # train_annotation_file:     "/data3/zly/samacoco/samacocoperson/labels.json"
+  # val_dataloader: samacoco
+  # val_dataset_root_path:     "/data3/zly/samacoco/samacocoperson_valid/data"
+  # val_annotation_file:       "/data3/zly/samacoco/samacocoperson_valid/labels.json"
+  # val_length: -1
+dataset:
+  use_mix_mode: true  # 开启混合模式
+  train_datasets:
+    - name: MOTS
+      path: "/data2/zly/mots_data/MOTS2020/train"
+      ratio: 0.05
+    - name: samacoco
+      path: "/data3/zly/samacoco/samacocoperson/data"
+      annotation_file: "/data3/zly/samacoco/samacocoperson/labels.json"
+      ratio: 1
+  val_datasets:
+    - name: MOTS
+      path: "/data2/zly/mots_data/MOTS2020/train"
+      ratio: 0.05
+      val_lenth: 2048
+    - name: samacoco
+      path: "/data3/zly/samacoco/samacocoperson_valid/data"
+      annotation_file: "/data3/zly/samacoco/samacocoperson_valid/labels.json"
+      ratio: 1
+      val_length: -1
 test:
   use_hq: True
+  pred_iou_thresh: 0.5
+  stability_score_thresh: 0.6
+  person_probability_thresh: 0.65
+

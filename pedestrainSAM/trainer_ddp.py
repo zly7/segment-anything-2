@@ -11,19 +11,19 @@ import torch.nn.functional as F
 import torch.distributed as dist
 from torch.utils.data import DataLoader, DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.optim.lr_scheduler import LambdaLR, ChainedScheduler
 from tensorboardX import SummaryWriter
 from loguru import logger
 from sam2.build_sam import build_sam2, build_sam2_for_self_train
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.utils.transforms import SAM2Transforms
 from typing import Optional
-from dataset_zly import MOTSDataset
-from dataset_zly import COCOPersonDataset
+from dataset_zly import MOTSDataset,COCOPersonDataset, CombinedDataset
 from PIL import Image, ImageDraw, ImageFont
 from training.loss_fns import sigmoid_focal_loss, dice_loss, iou_loss
 from typing import Union
 from torchvision import transforms as torch_transforms  # 导入 torchvision 的 transforms 模块
-
+print("!!!!!!!!!!!!come to this file!!!!!!!!!!!!!!")
 class PedestrainSAM2(nn.Module):
     def __init__(
         self,
@@ -49,20 +49,26 @@ class PedestrainSAM2(nn.Module):
         for param in self.sam2_model.sam_prompt_encoder.parameters():
             param.requires_grad = False
 
-    def forward(self, image, point_coords, point_labels):
+    def forward(self, image:Optional[Union[torch.Tensor, np.ndarray]], point_coords = None , point_labels = None, box = None):
         """
         image tensor: (B, 3, H, W) (B,3,1024,1024)
         points_coords: (B, N, 2)
         point_labels: (B, N)
+        box: (B, 2, 2)
         """
-        assert image.size(1) == 3, "Input image must have 3 channels."
-        self._orig_hw = [(image.size(2), image.size(3))]
-        if not self.config["train"]["transfer_image_in_dataset_use_sam2"]:
-            image = self._transforms.transform_tensor(image)
+        if not self.config["train"]["transfer_image_in_dataset_use_sam2"]: # This line should be done first
+            b, h, w, c = image.shape # 对应测试的时候不一定是已经resize好的image，point_coords是原始的绝对坐标，box是原始的绝对坐标
+            assert c == 3
+            image = self._transforms.forward_batch_numpy(image)
+            assert isinstance(image, torch.Tensor)
+            self._orig_hw = [(h, w)]
+        else:
+            self._orig_hw = [(image.size(2), image.size(3))] # 对应训练集基本都是已经resize好的image,但是point_coords是1024的绝对坐标
+        assert image.shape[1] == 3, "Input image must have 3 channels. current image.shape is {}".format(image.shape)
         _features = self._image_encoder(image)
         img_embed, high_res_features = _features["image_embed"], _features["high_res_feats"]
         mask_input, unnorm_coords, labels, unnorm_box = self._prep_prompts(
-            point_coords, point_labels, None, None, normalize_coords=True
+            point_coords, point_labels, box, None, normalize_coords=True
         )
         if point_coords is not None:
             concat_points = (unnorm_coords, labels)
@@ -73,8 +79,8 @@ class PedestrainSAM2(nn.Module):
             boxes=None,
             masks=None,
         ) # spare [b,2,256],[6,256,64,64]
-        if not self.config["train"]["transfer_image_in_dataset_use_sam2"]:
-            high_res_features = [feat_level[-1].unsqueeze(0) for feat_level in _features["high_res_feats"]] # 这句话直接把[b,32,256,256] 变成[1,32,256,256],想想都觉得铁错
+        # if not self.config["train"]["transfer_image_in_dataset_use_sam2"]:
+        #     high_res_features = [feat_level[-1].unsqueeze(0) for feat_level in _features["high_res_feats"]] # 这句话直接把[b,32,256,256] 变成[1,32,256,256],想想都觉得铁错
         low_res_masks_logits, iou_predictions, sam_tokens_out, object_score_logits, person_logits = self.sam2_model.sam_mask_decoder(
             image_embeddings=img_embed,  # (B, 256, 64, 64)
             image_pe=self.sam2_model.sam_prompt_encoder.get_dense_pe(),
@@ -174,8 +180,9 @@ class PedestrainSAM2(nn.Module):
 
     def predict_torch(
         self,
-        point_coords,
-        point_labels,
+        point_coords = None,
+        point_labels = None,
+        box = None,
         sparse_embeddings=None,
         dense_embeddings=None,
         predict_logit = False,
@@ -192,7 +199,7 @@ class PedestrainSAM2(nn.Module):
         # If embeddings are provided, use them; otherwise compute them
         if sparse_embeddings is None or dense_embeddings is None:
             mask_input, unnorm_coords, labels, unnorm_box = self._prep_prompts(
-                point_coords, point_labels, None, None, normalize_coords=True
+                point_coords, point_labels, box, None, normalize_coords=True
             )
             if point_coords is not None:
                 concat_points = (unnorm_coords, labels)
@@ -200,7 +207,7 @@ class PedestrainSAM2(nn.Module):
                 concat_points = None
             sparse_embeddings, dense_embeddings = self.sam2_model.sam_prompt_encoder(
                 points=concat_points,
-                boxes=None,
+                boxes=box,
                 masks=None,
             )
 
@@ -303,18 +310,18 @@ class Trainer:
         self.rank = rank
         self.device = torch.device('cuda', device_index)
         self.wrap_model = wrap_model
-        self.model = wrap_model.sam2_model.to(self.device)
+        self.model = wrap_model.module.sam2_model if isinstance(wrap_model, DDP) else wrap_model.sam2_model
         self.train_loader = train_loader
         self.val_loader = val_loader
-
+        self.valid_epoch = int(config["train"]["valid_every_train_epoch"])
         # Define loss function
         self.criterion = FocalDiceIoULoss(weight_focal=20.0, weight_dice=1.0, weight_iou=1.0).to(self.device)
         self.criterion_for_person =  nn.BCEWithLogitsLoss().to(self.device)
         missing_keys_params = []
         other_params = []
-        
+        trainable_layers = config['model']['trainable_layers']
         for name, param in self.model.named_parameters():
-            if name in missing_keys:
+            if name in missing_keys or any(layer in name for layer in trainable_layers):
                 logger.info(f"{name} params is registered as missing_key_params_list")
                 missing_keys_params.append(param)
             else:
@@ -336,20 +343,23 @@ class Trainer:
         self.optimizer = optim.AdamW(
             param_groups,
             lr=float(config["train"]["learning_rate"]),
+            weight_decay=0.1
         )
         #Total number of training steps
         self.num_epochs = config["train"]["num_epochs"]
         self.total_steps = self.num_epochs * len(self.train_loader)
-
-        # Define learning rate scheduler (Cosine Annealing to zero)
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        self.warm_up_step = config["train"]["warm_up_step"]
+        self.warm_up_scheduler =  LambdaLR(self.optimizer, lr_lambda=lambda step: step / self.warm_up_step)
+        self.cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,
-            T_max=self.total_steps,
+            T_max=self.total_steps - self.warm_up_step,
             eta_min=0
         )
+        self.scheduler = ChainedScheduler([self.warm_up_scheduler, self.cosine_scheduler])
 
         # Initialize GradScaler for mixed precision
         self.scaler = torch.cuda.amp.GradScaler()
+        self.max_norm = config["train"]["max_norm"]
 
         self.num_epochs = config["train"]["num_epochs"]
         self.save_path = config["train"]["save_path"]
@@ -358,20 +368,35 @@ class Trainer:
         # Initialize logging (only on main process)
         if self.rank == 0:
             self.writer = SummaryWriter(log_dir=config["log"]["tensorboard_log_dir"])
-            logger.add(config["log"]["loguru_log_file"])
             logger.success(
                 f"------------------------------------{self.device}Trainer initialized.---------------------------------"
             )
-        self.log_interval = config["log"]["log_interval"]
+        self.log_interval_batch = config["log"]["log_interval_batch"]
         self.config = config
-
+        self._load_checkpoint()
+        
+    def _load_checkpoint(self):
+        """加载检查点文件进行断点续训"""
+        checkpoint_path = self.config["model"]["pretrain_model_path"]
+        if self.config["train"]["continue_training"] == False:
+            self.start_epoch = 0
+            logger.info("Not resuming training.")
+            return
+        else:
+            checkpoint = torch.load(checkpoint_path, map_location=self.device)
+            self.optimizer.load_state_dict(checkpoint["optimizer"])
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+            self.start_epoch = checkpoint["epoch"]
+            self.scaler.load_state_dict(checkpoint["scaler"])
+            logger.success(f"Resumed training from epoch {self.start_epoch}")
+    
     def train(self):
         start_time = time.time()
-        total_steps = self.num_epochs * len(self.train_loader)
+        total_steps = (self.num_epochs-self.start_epoch) * len(self.train_loader)
         global_step = 0  # Track the global step
-        for epoch in range(self.num_epochs):
+        for epoch in range(self.start_epoch, self.num_epochs):
             self.model.train()
-            if self.config["train"]["validate_first"] == True:
+            if self.config["train"]["validate_first"] == True and (epoch % self.valid_epoch == 0):
                 val_loss = self.validate(epoch)
             if self.train_loader.sampler is not None and hasattr(self.train_loader.sampler, 'set_epoch'):
                 self.train_loader.sampler.set_epoch(epoch)
@@ -407,18 +432,17 @@ class Trainer:
                         mask_loss = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
 
                     loss = mask_loss + person_loss
-                    # loss = person_loss
                 # Backward and optimize
                 self.scaler.scale(loss).backward()
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=self.max_norm)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
                 self.scheduler.step()
                 epoch_loss += loss.item()
 
                 # Logging (only on main process)
-                if batch_idx % self.log_interval == 0 and self.rank == 0:
+                if batch_idx % self.log_interval_batch == 0 and self.rank == 0:
                     # 计算当前步骤数和已经消耗的时间
                     current_step = epoch * len(self.train_loader) + batch_idx + 1
                     elapsed_time = time.time() - start_time
@@ -430,14 +454,13 @@ class Trainer:
                     # 将剩余时间转换为小时、分钟和秒
                     remaining_hours = int(remaining_time // 3600)
                     remaining_minutes = int((remaining_time % 3600) // 60)
-                    remaining_seconds = int(remaining_time % 60)
 
                     logger.info(
                         f"Epoch [{epoch+1}/{self.num_epochs}], "
                         f"Step [{batch_idx+1}/{len(self.train_loader)}], "
                         f"Mask Loss: {mask_loss.item():.4f}, "
                         f"Person Classfication Loss: {person_loss.item():.4f}, "
-                        f"The Full Remaining Time: {remaining_hours:02d}:{remaining_minutes:02d}:{remaining_seconds:02d}"
+                        f"The Full Remaining Time: {remaining_hours:02d} hours:{remaining_minutes:02d} minutes"
                     )
                     self.writer.add_scalar(
                         "Training/Loss",
@@ -455,14 +478,18 @@ class Trainer:
                         epoch * len(self.train_loader) + batch_idx,
                     )
 
-            if self.config["train"]["validate_first"] == False:
+            if self.config["train"]["validate_first"] == False and ((epoch + 1) % self.valid_epoch == 0):
                 val_loss = self.validate(epoch)
+                logger.info(
+                    f"Epoch [{epoch+1}/{self.num_epochs}], Validation Loss: {val_loss:.4f}"
+                )
             # Save checkpoint (only on main process)
             if self.rank == 0:
                 checkpoint = {
                     "model": self.model.state_dict(),
                     "optimizer": self.optimizer.state_dict(),
                     "scaler": self.scaler.state_dict(),
+                    "scheduler": self.scheduler.state_dict(),
                     "epoch": epoch,
                 }
                 torch.save(
@@ -474,9 +501,9 @@ class Trainer:
                 avg_epoch_loss = epoch_loss / len(self.train_loader)
                 self.writer.add_scalar("Epoch/Training Loss", avg_epoch_loss, epoch)
                 logger.info(
-                    f"Epoch [{epoch+1}/{self.num_epochs}] Training Loss: {avg_epoch_loss:.4f}, Validation Loss: {val_loss:.4f}"
+                    f"Epoch [{epoch+1}/{self.num_epochs}] Training Loss: {avg_epoch_loss:.4f}"
                 )
-        if self.config["train"]["validate_first"] == True:
+        if self.config["train"]["validate_first"] == True and epoch % self.valid_epoch == 0:
             val_loss = self.validate(epoch)
         
     def validate(self, epoch):
@@ -556,7 +583,7 @@ class Trainer:
                     logger.info(
                         f"Processed {batch_idx + 1}/{total_batches} batches. "
                         f"Elapsed Time: {elapsed_time:.2f} seconds, "
-                        f"Estimated Remaining Time: {estimated_remaining_time:.2f} seconds."
+                        f"Estimated Remaining Time: {(estimated_remaining_time // 60):.2f} minutes."
                         f"Person Labels Num: {is_person_labels_num}, Not Person Labels Num: {not_person_labels_num}"
                     )
 
@@ -755,27 +782,105 @@ class Trainer:
         blended_gt.convert('RGB').save(save_gt_mask_img_path)
         
 
+def get_dataset(config, dataset_type="train"):
+    """
+    根据配置文件自动选择并加载单个或混合数据集。
+    
+    Args:
+        config (dict): 配置文件内容
+        dataset_type (str): 数据集类型（"train" 或 "val"）
+
+    Returns:
+        dataset: 返回加载后的数据集
+    """
+    main_datasets = []
+    aux_datasets = []
+    ratios = []
+
+    if config["dataset"].get("use_mix_mode", False):
+        dataset_config_list = config["dataset"].get(f"{dataset_type}_datasets", [])
+        for dataset_config in dataset_config_list:
+            dataset_name = dataset_config["name"]
+            dataset_path = dataset_config["path"]
+            ratio = dataset_config.get("ratio", 1.0 / len(dataset_config_list))  
+            if ratio == 1.0:
+                datasets = main_datasets
+            else:
+                datasets = aux_datasets
+                ratios.append(ratio)
+            val_length = dataset_config.get("val_length", -1)  # 默认-1，即不限制长度
+            
+            if dataset_name == "MOTS":
+                datasets.append(MOTSDataset(
+                    root_path=dataset_path,
+                    use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
+                    augment=True,
+                    enable_negative_sample=True,
+                    max_length_for_validate=val_length if dataset_type == "val" else None
+                ))
+            elif dataset_name in ["openimagev7", "coco", "samacoco"]:
+                annotation_file = dataset_config.get("annotation_file", None)
+                datasets.append(COCOPersonDataset(
+                    images_dir=dataset_path,
+                    annotation_file=annotation_file,
+                    use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
+                    augment= True,
+                    enable_negative_sample=True,
+                    max_length_for_validate=val_length if dataset_type == "val" else None
+                ))
+            else:
+                raise ValueError(f"未识别的数据集名称: {dataset_name}")
+            
+        dataset = CombinedDataset(main_datasets=main_datasets, auxiliary_datasets=aux_datasets, auxiliary_ratio=ratios)
+    else:
+        # 单一数据集模式
+        dataset_name = config["dataset"].get(f"{dataset_type}_dataloader")
+        dataset_path = config["dataset"].get(f"{dataset_type}_dataset_root_path")
+        annotation_file = config["dataset"].get(f"{dataset_type}_annotation_file", None)
+        val_length = config["dataset"].get("val_length", -1)
+
+        if dataset_name == "MOTS":
+            dataset = MOTSDataset(
+                root_path=dataset_path,
+                use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"],
+                augment=True,
+                enable_negative_sample=True,
+                max_length_for_validate=val_length if dataset_type == "val" else None
+            )
+        elif dataset_name in ["openimagev7", "coco", "samacoco"]:
+            dataset = COCOPersonDataset(
+                images_dir=dataset_path,
+                annotation_file=annotation_file,
+                use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"],
+                augment=True,
+                enable_negative_sample=True,
+                max_length_for_validate=val_length if dataset_type == "val" else None
+            )
+        else:
+            raise ValueError(f"未识别的数据集名称: {dataset_name}")
+
+    return dataset
+
 def main():
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--config_path", default="./train_config/train_large.yaml")
-    parser.add_argument("--local_rank", type=int, default=0)
+    parser.add_argument("--local_rank", type=int)
     parser.add_argument("--device_index", type=int, default=0)
     args = parser.parse_args()
-
-
-    # # Initialize distributed environment
-    # torch.distributed.init_process_group(backend="nccl", init_method="env://")
-    # torch.cuda.set_device(args.local_rank)
-    # device = torch.device("cuda", args.local_rank)
-    # rank = torch.distributed.get_rank()
-    # world_size = torch.distributed.get_world_size()
+    print(f"From argument local_rank:{args.local_rank},device_index:{args.device_index}")
     if 'WORLD_SIZE' in os.environ and int(os.environ['WORLD_SIZE']) > 1:
-        
         # DDP 模式
-        dist.init_process_group(backend="nccl")
-        args.local_rank = dist.get_rank() # args.local_rank有问题
+        print(f"!!!!!!!!!!!!!!!!!!!Choose DDP mode,world_size{os.environ['WORLD_SIZE']}!!!!!!!!!!!!!!!!!!!")
+        # dist.init_process_group(backend="nccl", init_method="env://")
+        dist.init_process_group(
+            backend="nccl", 
+            init_method="tcp://10.16.64.8:29500",  # 主节点的 IP 和端口
+            world_size=int(os.environ['WORLD_SIZE']),
+            rank=int(os.environ['RANK'])
+        )
+        dist.barrier()
+        args.local_rank = dist.get_rank() # args.local_rank有问题,多机不能这样做
         torch.cuda.set_device(args.local_rank)#理论上torchrun 自动分配
         device_index =args.local_rank
         rank = dist.get_rank()
@@ -789,40 +894,22 @@ def main():
     # Load config
     with open(args.config_path, "r") as f:
         config = yaml.safe_load(f)
+    if rank == 0 :
+        logger.add(config["log"]["loguru_log_file"])
     from datetime import datetime
     current_time = datetime.now()
     formatted_time = current_time.strftime("%Y-%m-%d-%H-%M")
     config["train"]["save_path"] = os.path.join(config["train"]["save_path"] ,formatted_time)
     config["log"]["tensorboard_log_dir"] = os.path.join(config["log"]["tensorboard_log_dir"] ,formatted_time)
-    if not os.path.exists(config["train"]["save_path"]):
-        os.makedirs(config["train"]["save_path"])
-    shutil.copytree("./pedestrainSAM", os.path.join(config["train"]["save_path"],"code", "pedestrainSAM")) # 保存一些代码
-    shutil.copytree("./sam2", os.path.join(config["train"]["save_path"],"code", "sam2"))
-    shutil.copy(args.config_path, os.path.join(config["train"]["save_path"], os.path.basename(args.config_path)))
+    if rank == 0:
+        if not os.path.exists(config["train"]["save_path"]):
+            os.makedirs(config["train"]["save_path"])
+        shutil.copytree("./pedestrainSAM", os.path.join(config["train"]["save_path"],"code", "pedestrainSAM")) # 保存一些代码
+        shutil.copytree("./sam2", os.path.join(config["train"]["save_path"],"code", "sam2"))
+        shutil.copy(args.config_path, os.path.join(config["train"]["save_path"], os.path.basename(args.config_path)))
     # Build dataset and dataloader
-    # Replace 'MOTSDataset' with your actual dataset class
-    if config["dataset"]["train_dataloader"] == "MOTS":
-        train_dataset = MOTSDataset(
-            root_path=config["dataset"]["train_dataset_root_path"], use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
-            augment=False, enable_negative_sample=True
-        )
-    elif "v7" in config["dataset"]["train_dataloader"] or "coco" in config["dataset"]["train_dataloader"]:
-        train_dataset = COCOPersonDataset(images_dir=config["dataset"]["train_dataset_root_path"],
-            annotation_file=config["dataset"]["train_annotation_file"],
-            use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
-            augment=True, enable_negative_sample=True
-        )
-    if config["dataset"]["val_dataloader"] == "MOTS":
-        val_dataset = MOTSDataset(
-            root_path=config["dataset"]["val_dataset_root_path"], use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
-            augment=True, max_length_for_validate = int(config["dataset"]["val_length"]),enable_negative_sample=True
-        )
-    elif "v7" in config["dataset"]["train_dataloader"] or "coco" in config["dataset"]["train_dataloader"]:
-        val_dataset = COCOPersonDataset(images_dir=config["dataset"]["val_dataset_root_path"],
-            annotation_file=config["dataset"]["val_annotation_file"],
-            use_SAM2_transform=config["train"]["transfer_image_in_dataset_use_sam2"], 
-            augment=True, max_length_for_validate = config["dataset"]["val_length"],enable_negative_sample=True
-        )
+    train_dataset = get_dataset(config, dataset_type="train")
+    val_dataset = get_dataset(config, dataset_type="val")
 
     if world_size > 1:
         # 多 GPU 模式，使用 DistributedSampler
@@ -868,10 +955,8 @@ def main():
 
     # Wrap model with DDP
     if 'WORLD_SIZE' in os.environ and int(os.environ['WORLD_SIZE']) > 1:
-        pedestrain_sam_model.sam2_model = DDP(
-            pedestrain_sam_model.sam2_model, device_ids=[args.local_rank], output_device=args.local_rank
-        )
-
+        logger.success("Wrapping model with DDP")
+        pedestrain_sam_model = DDP(pedestrain_sam_model, device_ids=[device_index], output_device=device_index, find_unused_parameters=True)
     # Create trainer
     trainer = Trainer(
         pedestrain_sam_model,
@@ -886,6 +971,6 @@ def main():
     # Start training
     trainer.train()
 
-
 if __name__ == "__main__":
+    print("---------------come into main---------------")
     main()

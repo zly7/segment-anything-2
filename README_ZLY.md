@@ -35,7 +35,7 @@ CUDA_VISIBLE_DEVICES=0 python -m memory_profiler run_sam2_no_overlap.py --datase
 python run_sam2_no_overlap.py --dataset MTMMC --split val --step_num 10 --vis False
 
 ## 
-torchrun --nproc_per_node=2 trainer_ddp.py --config_path ./train_config/train_large.yaml
+torchrun --nproc_per_node=2 ./pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
 python3 trainer_ddp.py --config_path ./train_config/train_large.yaml
 
 python3 ./pedestrainSAM/trainer_ddp.py --local_rank 0 --device_index 1 --config_path ./train_config/train_large.yaml
@@ -49,3 +49,48 @@ CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.test_ochuman_optimu
 ## 启动optuna 可视化网站
 optuna-dashboard sqlite:///optuna_study.db
 
+## glances 观测硬盘
+错误指令：压根没有下面的话
+glances --disk-io -D sdc2,sdd1,nvme0n1p3
+
+
+
+
+MASTER_ADDR="10.16.64.8" MASTER_PORT=29500 WORLD_SIZE=10 torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
+
+
+OMP_NUM_THREADS=4 MASTER_ADDR="10.16.64.8" MASTER_PORT=29500 WORLD_SIZE=4 torchrun --nproc_per_node=2 --nnodes=2 --node_rank=0  pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
+
+OMP_NUM_THREADS=4 MASTER_ADDR="10.16.64.8" MASTER_PORT=29500 WORLD_SIZE=4 CUDA_VISIBLE_DEVICES=6,7 torchrun --nproc_per_node=2 --nnodes=2 --node_rank=1 pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large_2080.yaml
+
+pkill -f pedestrainSAM/trainer_ddp.py
+
+
+MASTER_ADDR="10.16.64.8"
+MASTER_PORT=29500
+torchrun --nnodes=2 --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT --rdzv_id=100 ./pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
+
+```
+export MASTER_ADDR="10.16.64.8"  # 主节点 IP
+export MASTER_PORT=29500         # 主节点端口
+export WORLD_SIZE=4              # 总进程数
+
+export RANK=0
+python pedestrainSAM/trainer_ddp.py --local_rank=0 --config_path ./train_config/train_large.yaml &
+
+export RANK=1
+python pedestrainSAM/trainer_ddp.py --local_rank=1 --config_path ./train_config/train_large.yaml &
+
+```
+```
+export MASTER_ADDR="10.16.64.8"  # 主节点 IP
+export MASTER_PORT=29500         # 主节点端口
+export WORLD_SIZE=4              # 总进程数
+
+export RANK=2
+python pedestrainSAM/trainer_ddp.py --local_rank=0 --config_path ./train_config/train_large_2080.yaml &
+
+export RANK=3
+python pedestrainSAM/trainer_ddp.py --local_rank=1 --config_path ./train_config/train_large_2080.yaml &
+
+```

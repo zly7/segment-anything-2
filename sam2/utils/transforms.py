@@ -6,6 +6,7 @@
 
 import warnings
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,7 +47,10 @@ class SAM2Transforms(nn.Module):
         img_batch = torch.stack(img_batch, dim=0)
         return img_batch
     
-    # def foward_batch_tensor(self,)
+    def forward_batch_numpy(self,imgs:np.ndarray):
+        img_batch = [self.transforms(self.to_tensor(imgs[i])) for i in range(imgs.shape[0])]
+        img_batch = torch.stack(img_batch, dim=0)
+        return img_batch
 
     def transform_coords(
         self, coords: torch.Tensor, normalize=False, orig_hw=None

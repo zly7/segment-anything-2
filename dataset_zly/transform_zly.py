@@ -2,9 +2,10 @@
 
 import math
 import random
+from loguru import logger
 import numpy as np
 import torch
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageDraw
 import cv2
 from typing import List, Tuple, Optional
 from torchvision.transforms import functional as F
@@ -116,15 +117,38 @@ class RandomAffine:
 
         image = np.array(image_transformed)
         mask = (np.array(mask_transformed) > 127).astype(np.uint8)  # Convert back to binary mask
-        # Adjust click points
-        affine_matrix = self.get_full_affine_matrix(center, angle, translations, scale, (shear_x, shear_y))
-        #Add a column of ones for homogeneous coordinates
-        ones = np.ones((click_points.shape[0], 1))
-        click_points_homogeneous = np.hstack([click_points, ones])
-        transformed_points = click_points_homogeneous @ affine_matrix.T
+        click_mask = Image.new('L', (image_pil.width, image_pil.height), 0)
+        draw = ImageDraw.Draw(click_mask)
+        radius = 1  # Radius for the 2x2 square around each click point
+        transformed_click_points = []
+        for point in click_points:
+            x, y = point
+            click_mask = Image.new('L', (image_pil.width, image_pil.height), 0)
+            draw = ImageDraw.Draw(click_mask)
+            left_up_point = (x - radius, y - radius)
+            right_down_point = (x + radius, y + radius)
+            draw.rectangle([left_up_point, right_down_point], fill=1)
+            click_mask_transformed = F.affine(
+                click_mask,
+                angle=angle,
+                translate=translations,
+                scale=scale,
+                shear=(shear_x, shear_y),
+                interpolation=InterpolationMode.NEAREST,
+                fill=0,
+                center=center
+            )
+            click_mask_np = np.array(click_mask_transformed)
+            transformed_coords = np.argwhere(click_mask_np > 0)  # (num_points, 2), (y, x)
+            if transformed_coords.size == 0:
+                transformed_click_points.append([-1, -1]) # 靠事后随机滤掉
+                # logger.warning(f"No transformed click points found for original point ({x}, {y}).")
+            else:
+                mean_y, mean_x = transformed_coords.mean(axis=0)
+                transformed_click_points.append([round(mean_x), round(mean_y)])
         sample['image'] = image
         sample['mask'] = mask
-        sample['click_point'] = transformed_points[:, :2]
+        sample['click_point'] = np.array(transformed_click_points)
 
         return sample
 

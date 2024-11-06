@@ -53,7 +53,8 @@ def main():
     current_datetime = datetime.now()
     current_date_str = current_datetime.date().strftime("%Y-%m-%d")
     # which_to_replace_img_dir = "pred_images_" + current_date_str + "finetune_all_parameter"
-    which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test_no_filter"
+    # which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test_no_filter"
+    which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test"
     output_base_dir = img_dir.replace("images", which_to_replace_img_dir)
     if os.path.exists(output_base_dir):
         shutil.rmtree(os.path.join(output_base_dir,"code"))
@@ -84,12 +85,12 @@ def main():
         model=pedestrian_sam2,
         points_per_batch=16*16,  # Adjust based on your GPU memory
         points_per_side=16, # 这里是perside
-        pred_iou_thresh=0.7,
-        stability_score_thresh=0.8,
+        pred_iou_thresh=config["test"]["pred_iou_thresh"],
+        stability_score_thresh=config["test"]["stability_score_thresh"],
         crop_n_layers=0,
         crop_n_points_downscale_factor=2, # 0的时候不起作用
         min_mask_region_area=100,  # Requires OpenCV for post-processing
-        person_probability_thresh=0.7,
+        person_probability_thresh=config["test"]["person_probability_thresh"],
         vis=True,  # Set to True if you want to save visualizations
         vis_immediate_folder=which_to_replace_img_dir,
         loguru_path=f"./logs/ochuman_test/{current_date_str}.log",

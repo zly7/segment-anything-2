@@ -114,7 +114,7 @@ class COCOPersonDataset(Dataset):
 
         logger.success(f"Successfully loaded {len(self.data)} positive samples from {len(images_info)} images.")
 
-        if self.max_length_for_validate > 0:
+        if self.max_length_for_validate is not None and self.max_length_for_validate > 0:
             random.shuffle(self.data)
             self.data = self.data[:self.max_length_for_validate]
 
