@@ -34,9 +34,8 @@ CUDA_VISIBLE_DEVICES=0 mprof run run_sam2_no_overlap.py --dataset MTMMC --split 
 CUDA_VISIBLE_DEVICES=0 python -m memory_profiler run_sam2_no_overlap.py --dataset MTMMC --split val --step_num 10 --vis False --vis_frame_stride 1
 python run_sam2_no_overlap.py --dataset MTMMC --split val --step_num 10 --vis False
 
-## 
+## 2024-11-6 训练
 torchrun --nproc_per_node=2 ./pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
-python3 trainer_ddp.py --config_path ./train_config/train_large.yaml
 
 python3 ./pedestrainSAM/trainer_ddp.py --local_rank 0 --device_index 1 --config_path ./train_config/train_large.yaml
 
@@ -65,32 +64,8 @@ OMP_NUM_THREADS=4 MASTER_ADDR="10.16.64.8" MASTER_PORT=29500 WORLD_SIZE=4 CUDA_V
 
 pkill -f pedestrainSAM/trainer_ddp.py
 
+## test crowdhuman
+CUDA_VISIBLE_DEVICES=0 python -m pedestrainSAM.test_crowdhuman
 
-MASTER_ADDR="10.16.64.8"
-MASTER_PORT=29500
-torchrun --nnodes=2 --nproc_per_node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT --rdzv_id=100 ./pedestrainSAM/trainer_ddp.py --config_path ./train_config/train_large.yaml
-
-```
-export MASTER_ADDR="10.16.64.8"  # 主节点 IP
-export MASTER_PORT=29500         # 主节点端口
-export WORLD_SIZE=4              # 总进程数
-
-export RANK=0
-python pedestrainSAM/trainer_ddp.py --local_rank=0 --config_path ./train_config/train_large.yaml &
-
-export RANK=1
-python pedestrainSAM/trainer_ddp.py --local_rank=1 --config_path ./train_config/train_large.yaml &
-
-```
-```
-export MASTER_ADDR="10.16.64.8"  # 主节点 IP
-export MASTER_PORT=29500         # 主节点端口
-export WORLD_SIZE=4              # 总进程数
-
-export RANK=2
-python pedestrainSAM/trainer_ddp.py --local_rank=0 --config_path ./train_config/train_large_2080.yaml &
-
-export RANK=3
-python pedestrainSAM/trainer_ddp.py --local_rank=1 --config_path ./train_config/train_large_2080.yaml &
-
+CUDA_VISIBLE_DEVICES=0 python -m pedestrainSAM.predict_crowdhuman_coco
 ```

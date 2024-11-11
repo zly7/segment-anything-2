@@ -112,9 +112,9 @@ class MaskDecoder(nn.Module):
         # HQ-SAM parameters #hq
         self.hq_token = nn.Embedding(1, transformer_dim)  # HQ-Output-Token #hq
         self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)  #hq
-        self.num_mask_tokens = self.num_mask_tokens + 1  #hq
+        self.num_mask_tokens = self.num_mask_tokens + 1  
 
-        # Convolutional layers for obtaining HQ-Feature #hq 反卷积的步长就是扩大的倍数
+        # Convolutional layers for obtaining HQ-Feature #hq 反卷积的步长就是扩大的倍数,还有一个是通道数
         self.compress_feature_2 = nn.Sequential(
             nn.ConvTranspose2d(transformer_dim, transformer_dim // 2, kernel_size=2, stride=2),
             LayerNorm2d(transformer_dim //2),  
@@ -122,10 +122,20 @@ class MaskDecoder(nn.Module):
             nn.ConvTranspose2d(transformer_dim // 2, transformer_dim // 8, kernel_size=2, stride=2),  
         )  
 
-        self.compress_feature_1 = nn.ConvTranspose2d(transformer_dim // 4, transformer_dim // 8, kernel_size=2, stride=2)  
+        
+        self.compress_feature_1 = nn.Sequential(
+            nn.ConvTranspose2d(transformer_dim // 4, transformer_dim // 4, kernel_size=2, stride=2),
+            LayerNorm2d(transformer_dim //4),  
+            nn.GELU(),
+            nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1),
+        )  
 
-
-        self.compress_feature_0 = nn.Conv2d(transformer_dim // 8, transformer_dim // 8, 3, 1, 1)  
+        self.compress_feature_0 = nn.Sequential( # 这里感受野就是3x3
+            nn.Conv2d(transformer_dim // 8, transformer_dim // 4, 3, 1, 1),
+            LayerNorm2d(transformer_dim // 4 ),
+            nn.GELU(),
+            nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1),
+        )
 
 
     def forward(
@@ -165,19 +175,19 @@ class MaskDecoder(nn.Module):
             use_hq = use_hq
         )
 
-        # HQ-SAM mask selection logic #hq
+        # HQ-SAM mask selection logic 
         if multimask_output:
-            # Mask with highest score #hq
-            mask_slice = slice(1, self.num_mask_tokens - 1)  #hq
-            iou_pred_slice = iou_pred[:, mask_slice]  #hq
-            iou_pred_max, max_iou_idx = torch.max(iou_pred_slice, dim=1)  #hq
-            iou_pred = iou_pred_max.unsqueeze(1)  #hq
-            masks_multi = masks[:, mask_slice, :, :]  #hq
-            masks_sam = masks_multi[torch.arange(masks_multi.size(0)), max_iou_idx].unsqueeze(1)  #hq
+            # Mask with highest score 
+            mask_slice = slice(1, self.num_mask_tokens - 1)  
+            iou_pred_slice = iou_pred[:, mask_slice]  
+            iou_pred_max, max_iou_idx = torch.max(iou_pred_slice, dim=1)  
+            iou_pred = iou_pred_max.unsqueeze(1)  
+            masks_multi = masks[:, mask_slice, :, :]  
+            masks_sam = masks_multi[torch.arange(masks_multi.size(0)), max_iou_idx].unsqueeze(1)  
         else:
-            mask_slice = slice(0, 1)  #hq
-            iou_pred = iou_pred[:, mask_slice]  #hq
-            masks_sam = masks[:, mask_slice]  #hq
+            mask_slice = slice(0, 1)  
+            iou_pred = iou_pred[:, mask_slice]  
+            masks_sam = masks[:, mask_slice]  
             
         if use_hq:
             masks_hq = masks[:, slice(self.num_mask_tokens - 1, self.num_mask_tokens)]  #hq
@@ -247,7 +257,7 @@ class MaskDecoder(nn.Module):
         # Run the transformer
         hs, src = self.transformer(src, pos_src, tokens)
         iou_token_out = hs[:, s, :]
-        mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :]
+        mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :] # hq算是mask_token
         person_class_token = hs[:, s + 1 + self.num_mask_tokens, :]
 
         # Upscale mask embeddings and predict masks using the mask tokens

@@ -23,7 +23,6 @@ from PIL import Image, ImageDraw, ImageFont
 from training.loss_fns import sigmoid_focal_loss, dice_loss, iou_loss
 from typing import Union
 from torchvision import transforms as torch_transforms  # 导入 torchvision 的 transforms 模块
-print("!!!!!!!!!!!!come to this file!!!!!!!!!!!!!!")
 class PedestrainSAM2(nn.Module):
     def __init__(
         self,
@@ -207,7 +206,7 @@ class PedestrainSAM2(nn.Module):
                 concat_points = None
             sparse_embeddings, dense_embeddings = self.sam2_model.sam_prompt_encoder(
                 points=concat_points,
-                boxes=box,
+                boxes=unnorm_box,
                 masks=None,
             )
 
@@ -231,7 +230,7 @@ class PedestrainSAM2(nn.Module):
         if len(person_logits.size()) == 3 and person_logits.size(1) == 1:
             person_logits = person_logits.squeeze(1)
         low_res_masks_logits = torch.clamp(low_res_masks_logits, -32.0, 32.0)
-        prd_masks = self._transforms.postprocess_masks(low_res_masks_logits, self._orig_hw[-1])
+        prd_masks = self._transforms.postprocess_masks(low_res_masks_logits, self._orig_hw[-1]) # 这里如果是原本的图片非常大，这里会消耗很大cuda显存
         if predict_logit == False:
             prd_masks = prd_masks > self._transforms.mask_threshold
         return prd_masks, iou_predictions, person_logits, low_res_masks_logits
@@ -329,7 +328,7 @@ class Trainer:
         for param in other_params:
             param.requires_grad = False
         param_groups = [
-            {"params": list(filter(lambda p: p.requires_grad, missing_keys_params)), "lr": float(config["train"]["learning_rate"]) * 10},  # 10倍学习率
+            {"params": list(filter(lambda p: p.requires_grad, missing_keys_params)), "lr": float(config["train"]["learning_rate"]) * config["train"]["lr_multiple_for_new_param"]},  # 10倍学习率
             # {"params": filter(lambda p: p.requires_grad, other_params), "lr": float(config["train"]["learning_rate"])},  # 默认学习率
         ]
         # Now print the param_groups for inspection
@@ -348,7 +347,7 @@ class Trainer:
         #Total number of training steps
         self.num_epochs = config["train"]["num_epochs"]
         self.total_steps = self.num_epochs * len(self.train_loader)
-        self.warm_up_step = config["train"]["warm_up_step"]
+        self.warm_up_step = int(config["train"]["warm_up_step_ratio"] * self.total_steps)
         self.warm_up_scheduler =  LambdaLR(self.optimizer, lr_lambda=lambda step: step / self.warm_up_step)
         self.cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             self.optimizer,

@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import time
@@ -23,6 +24,7 @@ from .transform_zly import (
     ColorJitter,
     RandomAffine
 )
+from scipy.ndimage import binary_erosion, binary_dilation
 class MOTSDataset(Dataset):
     def __init__(self, root_path, use_SAM2_transform=True, augment=False, img_output_size=1024, max_length_for_validate=-1, enable_negative_sample=True):
         self.root_path = root_path
@@ -96,48 +98,9 @@ class MOTSDataset(Dataset):
         max_retries = 10
         for attempt in range(1, max_retries + 1):
             if self.enable_negative_sample and (int(time.time() * 1000) % 2) == 0:
-                # Negative sample
-                img_path = self.all_images[idx % len(self.all_images)]
-                image = Image.open(img_path)
-                image = np.array(image)  # H,W,C
-
-                # Get all masks for class_id == 2 and class_id == 10 (persons to exclude)
-                masks_to_exclude = []
-                objects = self.objects_per_image[img_path]
-                for obj in objects:
-                    if obj.class_id == 2 or obj.class_id == 10:
-                        mask = rletools.decode(obj.mask)
-                        masks_to_exclude.append(mask)
-
-                # Combine masks to exclude
-                if masks_to_exclude:
-                    combined_exclude_mask = np.any(masks_to_exclude, axis=0)
-                else:
-                    combined_exclude_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
-
-                # Create the non-person mask (areas not labeled as person)
-                non_person_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
-
-                ys, xs = np.where(~combined_exclude_mask)
-                if len(ys) == 0:
-                    # If no non-person area, fall back to a positive sample
-                    return self.get_positive_sample(idx)
-                random_idx = random.randint(0, len(ys) - 1)
-                click_point = (xs[random_idx], ys[random_idx])
-
-                sample = {
-                    'image_path': img_path,
-                    'image': image,
-                    'mask': non_person_mask.astype(np.uint8),
-                    'click_point': np.array(click_point).reshape(1, 2),
-                    'is_person': torch.tensor([0]).float(),  # Negative sample
-                    'track_id':-1,
-                    'point_label': torch.tensor([1.0]), 
-                }
+                sample =  self.get_negative_sample(idx)
             else:
-                return self.get_positive_sample(idx)
-
-            sample = self.process_sample(sample)
+                sample =  self.get_positive_sample(idx)
             h, w = self.img_output_size, self.img_output_size
             click_point = sample['click_point'].squeeze(0).numpy()  # (2,)
             x, y = click_point
@@ -156,10 +119,11 @@ class MOTSDataset(Dataset):
 
         # Decode the binary mask
         binary_mask = rletools.decode(obj.mask)
-
-        ys, xs = np.where(binary_mask)
+        eroded_mask = binary_erosion(binary_mask, structure=np.ones((3, 3)))
+        ys, xs = np.where(eroded_mask)
         if len(ys) == 0:
-            raise Exception(f"No pixels found in mask for idx {idx}")
+            # If no non-person area, fall back to a negative sample
+            return self.get_negative_sample(idx)
         random_idx = random.randint(0, len(ys) - 1)
         click_point = (xs[random_idx], ys[random_idx])
 
@@ -174,33 +138,50 @@ class MOTSDataset(Dataset):
         }
         sample = self.process_sample(sample)
         return sample
+    
+    def get_negative_sample(self, idx):
+        # Negative sample
+        img_path = self.all_images[idx % len(self.all_images)]
+        image = Image.open(img_path)
+        image = np.array(image)  # H,W,C
 
-    # def process_sample(self, sample):
-    #     if self.augment:
-    #         sample = self.transform(sample) 
-    #     else:
-    #         # Resize to output size
-    #         if self.whether_use_sam2_transform:
-    #             sample['image'] = self.sam2_transform(sample['image'])# 这里主要强调了颜色的变化
-    #         else:
-    #             sample['image'] = cv2.resize(sample['image'], (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_LINEAR)
-    #             sample['image'] = torch.from_numpy(sample['image']).permute(2, 0, 1).float()  # (C, H, W)
-    #         h_orig, w_orig = sample['mask'].shape[:2]
-    #         sample['mask'] = cv2.resize(sample['mask'].astype(np.uint8), (self.img_output_size, self.img_output_size), interpolation=cv2.INTER_NEAREST)
-    #         scale_x = self.img_output_size / w_orig
-    #         scale_y = self.img_output_size / h_orig
-    #         sample['click_point'] = (sample['click_point'][0] * scale_x, sample['click_point'][1] * scale_y)
+        # Get all masks for class_id == 2 and class_id == 10 (persons to exclude)
+        masks_to_exclude = []
+        objects = self.objects_per_image[img_path]
+        for obj in objects:
+            if obj.class_id == 2 or obj.class_id == 10:
+                mask = rletools.decode(obj.mask)
+                masks_to_exclude.append(mask)
+                
+        if masks_to_exclude:
+            combined_exclude_mask = np.any(masks_to_exclude, axis=0)
+        else:
+            combined_exclude_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
 
-    #     # Convert to tensors
-    #     sample['mask'] = torch.from_numpy(sample['mask']).float()  # (H, W) # 这里不应该unsqueeze
-    #     sample['click_point'] = torch.tensor(sample['click_point']).unsqueeze(0).float()  # (1,2)
-    #     sample['point_label'] = torch.tensor([1]).float()  # (1,)
-    #     return sample
+        # Create the non-person mask (areas not labeled as person)
+        non_person_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
+        combined_exclude_mask_dilation = binary_dilation(combined_exclude_mask, structure=np.ones((3, 3)))
+        ys, xs = np.where(~combined_exclude_mask_dilation)
+        if len(ys) == 0:
+            non_person_indices = np.where(~combined_exclude_mask)
+            if non_person_indices[0].size == 0:
+                return self.get_positive_sample(idx)
+        random_idx = random.randint(0, len(ys) - 1)
+        click_point = (math.floor(xs[random_idx]), math.floor(ys[random_idx]))
+
+        sample = {
+            'image_path': img_path,
+            'image': image,
+            'mask': non_person_mask.astype(np.uint8),
+            'click_point': np.array(click_point).reshape(1, 2),
+            'is_person': torch.tensor([0]).float(),  # Negative sample
+            'track_id':-1,
+            'point_label': torch.tensor([1.0]), 
+        }
+        sample = self.process_sample(sample)
+        return sample
+    
     def process_sample(self, sample):
         sample = self.transform_pipeline(sample)
         return sample
 
-    def transform(self, sample):
-        # [Your existing augmentation code can be used here]
-        # For brevity, the augmentation code is omitted, but you can include it as in your original script.
-        pass

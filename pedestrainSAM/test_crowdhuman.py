@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader, Dataset
 import matplotlib.pyplot as plt
 from typing import List, Dict
 import cv2
+from tqdm import tqdm
 import yaml
-
 from .trainer_ddp import PedestrainSAM2, build_sam2_for_self_train
 
 
@@ -53,65 +53,88 @@ class CocoDataset(Dataset):
 
         if self.transform:
             image = self.transform(image)
+        image = np.array(image) 
+        return image_id, image, boxes, image_filename
 
-        return image_id, image, boxes
 
-# Visualization function
-def visualize_predictions(image, boxes, masks, iou_predictions, person_logits, save_path, image_id):
-    # Convert image tensor to PIL Image
-    if isinstance(image, torch.Tensor):
-        image = transforms.ToPILImage()(image.cpu())
-    draw = ImageDraw.Draw(image)
+
+def visualize_predictions(image: np.ndarray, boxes, masks, iou_predictions, person_logits, save_path, image_filname):
+    from PIL import Image, ImageDraw, ImageFont
+    import numpy as np
+    import os
+
+    image = Image.fromarray(image)
     font = ImageFont.load_default()
 
-    # Overlay masks
-    mask_image = image.copy()
-    mask_draw = ImageDraw.Draw(mask_image)
-    for mask in masks:
-        mask = mask.cpu().numpy().astype(np.uint8) * 255  # Convert to 0-255
-        # Create a color mask
+    # 创建原始图像和带注释的图像副本
+    original_image = image.copy()
+    annotated_image = image.copy()
+
+    # 用于存储每个对象的颜色
+    colors = []
+
+    # 遍历每个掩码，绘制在带注释的图像上
+    for idx, mask in enumerate(masks):
+        mask = mask.cpu().numpy().astype(np.uint8) * 255  # 转换为0-255
+        # 生成随机颜色
         color = tuple(np.random.randint(0, 256, size=3).tolist())
+        colors.append(color)
+
+        # 创建彩色掩码
         mask_pil = Image.fromarray(mask, mode='L')
-        colored_mask = Image.new('RGBA', image.size, color + (0,))
-        mask_pil = mask_pil.resize(image.size, resample=Image.NEAREST)
+        colored_mask = Image.new('RGBA', annotated_image.size, color + (0,))
+        mask_pil = mask_pil.resize(annotated_image.size, resample=Image.NEAREST)
         mask_pil = mask_pil.point(lambda p: p > 0 and 200)
-        mask_image.paste(colored_mask, (0, 0), mask_pil)
+        annotated_image.paste(colored_mask, (0, 0), mask_pil)
 
-    # Blend original image with mask image
-    blended_image = Image.blend(image, mask_image, alpha=0.5)
-    draw = ImageDraw.Draw(blended_image)
+    # 创建绘图对象
+    draw_original = ImageDraw.Draw(original_image)
+    draw_annotated = ImageDraw.Draw(annotated_image)
 
-    # Draw bounding boxes and labels
+    # 在两张图上绘制边框和标签
     for idx, box in enumerate(boxes):
         box = box.tolist()
         iou_score = iou_predictions[idx].item()
         person_score = person_logits[idx].item()
         label = f"IoU: {iou_score:.2f}, Person: {person_score:.2f}"
-        draw.rectangle(box, outline='red', width=2)
-        draw.text((box[0], box[1]), label, fill='yellow', font=font)
+        color = colors[idx]
 
-    # Save the visualized image
-    save_filename = f"{image_id}.png"
-    blended_image.save(os.path.join(save_path, save_filename))
+        # 在原始图像上绘制
+        draw_original.rectangle(box, outline=color, width=2)
+        draw_original.text((box[0], box[1]), label, fill='yellow', font=font)
+
+        # 在带注释的图像上绘制
+        draw_annotated.rectangle(box, outline=color, width=2)
+        draw_annotated.text((box[0], box[1]), label, fill='yellow', font=font)
+
+    # 横向拼接两张图像
+    width, height = original_image.size
+    total_width = width * 2
+    combined_image = Image.new('RGB', (total_width, height))
+    combined_image.paste(original_image, (0, 0))
+    combined_image.paste(annotated_image, (width, 0))
+
+    # 保存拼接后的图像
+    save_filename = f"{image_filname}.png"
+    combined_image.save(os.path.join(save_path, save_filename))
+
+
+
 
 def main():
     # Parameters (modify as needed)
-    images_dir = '/path/to/coco/images'  # Path to images
-    annotations_file = '/path/to/coco/annotations/instances_train2017.json'  # Path to annotations
-    save_path = '/path/to/save/visualizations'  # Path to save visualized images
+    images_dir = '/data2/zly/mot_data/crowdhuman/Images'  # Path to images
+    annotations_file = '/data2/zly/mot_data/crowdhuman/crowdhuman_val_split.json'  # Path to annotations
+    save_path = '/data2/zly/mot_data/crowdhuman/SAM2_visualizations_val'  # Path to save visualized images
     batch_size = 32
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     # Create save directory if it doesn't exist
     os.makedirs(save_path, exist_ok=True)
 
-    # Define transformations (if any)
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-    ])
 
     # Initialize dataset and dataloader
-    dataset = CocoDataset(images_dir, annotations_file, transform=transform)
+    dataset = CocoDataset(images_dir, annotations_file, transform=None) # set_image 接受原生的PIL Image
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
     import argparse
     parser = argparse.ArgumentParser()
@@ -136,23 +159,23 @@ def main():
     model.to(device)
     model.eval()
 
-    with torch.no_grad():
-        for image_id, image, boxes in dataloader:
+    with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+        for image_id, image, boxes, image_filnames in tqdm(dataloader):
             image_id = image_id[0]
             image = image[0]  # Remove batch dimension
             boxes = boxes[0]  # Remove batch dimension
-
-            # Convert boxes to tensors
-            boxes = torch.tensor(boxes, dtype=torch.float32, device=device)
+            image_filnames = image_filnames[0]
+            # Convert boxes to tensorsq
+            boxes = boxes.clone().detach().to(dtype=torch.float32, device=device)
 
             # Process boxes in batches to avoid exceeding GPU memory
             num_boxes = boxes.shape[0]
             masks_list = []
             iou_predictions_list = []
             person_logits_list = []
-
-            # Set the image once
-            model.set_image(image)
+            image_ndarray = image.numpy()
+            assert image_ndarray.shape[-1] == 3
+            model.set_image(image_ndarray)
 
             for i in range(0, num_boxes, batch_size):
                 batch_boxes = boxes[i:i + batch_size]
@@ -168,9 +191,9 @@ def main():
                     predict_logit=False,
                     use_hq=False
                 )
-
-                # Append results
-                masks_list.extend(masks)
+                assert masks.shape[1] == 1
+                masks = masks[:, 0]
+                masks_list.extend(masks) # masks [b,1,h,w]
                 iou_predictions_list.extend(iou_predictions)
                 person_logits_list.extend(person_logits)
 
@@ -184,13 +207,13 @@ def main():
 
             # Visualize and save the results
             visualize_predictions(
-                image=image,
+                image=image_ndarray,
                 boxes=boxes.cpu(),
                 masks=masks,
                 iou_predictions=iou_predictions,
                 person_logits=person_logits,
                 save_path=save_path,
-                image_id=image_id
+                image_filname=image_filnames
             )
 
             print(f"Processed and saved visualization for image ID: {image_id}")

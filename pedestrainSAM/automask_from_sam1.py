@@ -4,6 +4,7 @@
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 
+from concurrent.futures import ProcessPoolExecutor
 import os
 import time
 from PIL import Image
@@ -36,6 +37,7 @@ from sam2.utils.amg import (
     uncrop_boxes_xyxy,
     uncrop_masks,
     uncrop_points,
+    mask_to_rle_pytorch_one_by_one,
 )
 from loguru import logger
 
@@ -59,7 +61,10 @@ class PedestrainSamAutomaticMaskGenerator:
         output_mode: str = "binary_mask",
         person_probability_thresh: float = 0.7,
         vis: bool = False,
-        vis_immediate_folder = "pred_images",
+        vis_detailed_process_prabability=0.1,
+        replaced_immediate_path = "images",
+        vis_immediate_folder_to_replace_images = "pred_images",
+        vis_resize_width = -1,
         loguru_path: str = "./",
         use_hq = False,
     ) -> None:
@@ -150,8 +155,11 @@ class PedestrainSamAutomaticMaskGenerator:
         self.output_mode = output_mode
         self.person_probability_thresh = person_probability_thresh
         self.vis = vis
-        self.vis_immediate_folder = vis_immediate_folder
+        self.vis_detailed_process_prabability = vis_detailed_process_prabability
+        self.replaced_immediate_path = replaced_immediate_path
+        self.vis_immediate_folder_to_replace_images = vis_immediate_folder_to_replace_images
         self.use_hq = use_hq
+        self.vis_resize_width = vis_resize_width
         logger.add(loguru_path, rotation="1 day", retention="7 days", level="DEBUG")
 
     @torch.no_grad()
@@ -378,7 +386,7 @@ class PedestrainSamAutomaticMaskGenerator:
         data.filter(keep_mask)
         logger.info(f"经过稳定性大于{self.stability_score_thresh}筛选,剩下{len(data["masks"])}个")
         data["boxes"] = batched_mask_to_box(data["masks"])
-        if self.vis:
+        if self.vis and np.random.rand() < self.vis_detailed_process_prabability:
             start_time = time.time()
             self.visualize_masks(
                 data["masks"],
@@ -396,7 +404,7 @@ class PedestrainSamAutomaticMaskGenerator:
 
         # Compress to RLE
         data["masks"] = uncrop_masks(data["masks"], crop_box, orig_h, orig_w)
-        data["rles"] = mask_to_rle_pytorch(data["masks"])
+        data["rles"] = mask_to_rle_pytorch_one_by_one(data["masks"])
         del data["masks"]
 
         return data
@@ -485,7 +493,20 @@ class PedestrainSamAutomaticMaskGenerator:
         
         return overlay
 
-    
+    # Define a helper function to process each mask in parallel
+    def process_mask(self, idx, mask, iou_pred, person_logit, stability_score, image, font, save_dir, person_probability_thresh):
+        overlay = self.overlay_mask_on_image(image, mask, iou_pred, person_logit, stability_score, font)
+        immediate_dir = "person" if person_logit > person_probability_thresh else "others"
+        save_path = os.path.join(save_dir, immediate_dir, f"{idx}.jpg")
+        overlay = overlay.convert("RGB")
+        overlay.save(save_path)
+
+        # Save the mask image
+        mask_pil = Image.fromarray((mask * 255).astype(np.uint8)).resize(image.size, resample=Image.NEAREST)
+        mask_pil = mask_pil.convert("L")
+        mask_save_path = os.path.join(save_dir, immediate_dir, f"{idx}_mask.jpg")
+        mask_pil.save(mask_save_path)
+        
     def visualize_masks(
         self,
         masks: torch.Tensor,
@@ -497,6 +518,20 @@ class PedestrainSamAutomaticMaskGenerator:
     ) -> None:
         # Convert cropped_image to PIL Image
         image = Image.fromarray(cropped_image)
+        if self.vis_resize_width > 1: # resize 0.05s 很快
+            new_width = self.vis_resize_width
+            new_height = int(self.vis_resize_width * image.size[1] / image.size[0])
+            image = image.resize((new_width, new_height), resample=Image.LANCZOS)
+
+            # Resize masks accordingly
+            masks_resized = torch.nn.functional.interpolate(
+                masks.unsqueeze(1).float(),  # Add channel dimension
+                size=(new_height, new_width),
+                mode='nearest'
+            ).squeeze(1).bool()  # Remove channel dimension and convert back to bool
+        else:
+            masks_resized = masks.bool()
+        
         font_path = "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf"
         font = ImageFont.truetype(font_path, 20)
 
@@ -505,9 +540,8 @@ class PedestrainSamAutomaticMaskGenerator:
         os.makedirs(os.path.join(save_dir, "person"), exist_ok=True)
         os.makedirs(os.path.join(save_dir, "others"), exist_ok=True)
 
-        # Iterate over each mask
-        for idx in range(masks.shape[0]):
-            mask = masks[idx].cpu().numpy()
+        for idx in range(masks_resized.shape[0]): # 这个一次循环0.2s,实测并行处理会更慢
+            mask = masks_resized[idx].cpu().numpy()
             iou_pred = iou_preds[idx].item()
             person_logit = person_logits[idx].item()
             stability_score = stability_scores[idx].item()  # Get stability_score for this mask
@@ -515,19 +549,15 @@ class PedestrainSamAutomaticMaskGenerator:
             # Overlay mask on image with stability_score
             overlay = self.overlay_mask_on_image(image, mask, iou_pred, person_logit, stability_score, font)
             immediate_dir = "person" if person_logit > self.person_probability_thresh else "others"
-            
-            # Save the image
             save_path = os.path.join(save_dir, immediate_dir, f"{idx}.jpg")
             overlay = overlay.convert("RGB")
-            overlay.save(save_path)
-            
-            # Convert mask to black and white image
+            overlay.save(save_path)  
             mask_pil = Image.fromarray((mask * 255).astype(np.uint8)).resize(image.size, resample=Image.NEAREST)
             mask_pil = mask_pil.convert("L")
-
             # Save the mask image
             mask_save_path = os.path.join(save_dir, immediate_dir, f"{idx}_mask.jpg")
-            mask_pil.save(mask_save_path)
+            mask_pil.save(mask_save_path) 
+
     
     def combine_masks(
         self,
@@ -563,7 +593,7 @@ class PedestrainSamAutomaticMaskGenerator:
         image_dir, image_filename = os.path.split(image_path)
         image_base, _ = os.path.splitext(image_filename)
         # Replace 'images' with 'pred_images' in image_dir
-        save_dir = image_dir.replace("images", self.vis_immediate_folder)
+        save_dir = image_dir.replace(self.replaced_immediate_path, self.vis_immediate_folder_to_replace_images)
         save_dir = os.path.join(save_dir, image_base)
         return save_dir, image_base
 

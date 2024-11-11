@@ -109,8 +109,8 @@ def main():
         img_path = img_path[0]  # Get the image path string
         image_np = np.array(image)
 
-        # Generate masks for the image
-        masks = mask_generator.generate(image_np,img_path)
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            masks = mask_generator.generate(image_np,img_path)
 
         # Prepare predictions in COCO format
         image_id = test_dataset.img_ids[idx]

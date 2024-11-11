@@ -1,9 +1,8 @@
 model:
   model_config: "sam2_hiera_l.yaml"
-  # pretrain_model_path: "/data2/zly/training/2024-10-21-19-20/model_epoch_3.pth"
-  pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
-  # pretrain_model_path: "/data2/zly/training/2024-10-31-21-45/model_epoch_1.pth"
-  # pretrain_model_path: "/data2/zly/training/2024-11-01-10-25/model_epoch_5.pth"
+  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
+  # pretrain_model_path: "/data2/zly/training/2024-11-02-22-57/model_epoch_12.pth"
+  pretrain_model_path: "/data2/zly/training/2024-11-07-20-29/model_epoch_3.pth"
   trainable_layers:
     - "sam_mask_decoder.person_classifier_mlp.layers"
     - "sam_mask_decoder.person_classifier_token"
@@ -13,11 +12,11 @@ model:
     - "sam_mask_decoder.compress_feature_1"
     - "sam_mask_decoder.compress_feature_0"
 train:
-  learning_rate: 1e-5
+  learning_rate: 3e-5
   weight_decay: 0.1
-  warm_up_step: 1000
+  warm_up_step_ratio: 0.05
   max_norm: 0.1
-  num_epochs: 26
+  num_epochs: 16
   save_path: '/data2/zly/training/'
   batch_size_one_gpu: 32
   validate_first: False
@@ -25,9 +24,10 @@ train:
   transfer_image_in_dataset_use_sam2: True
   valid_every_train_epoch: 2
   continue_training: False
+  lr_multiple_for_new_param: 10
 log:
   tensorboard_log_dir: './logs_tensorboard'
-  loguru_log_file: './logs/train/training_cuda_data_mix.log'
+  loguru_log_file: './logs/train/training_cuda_data_mix_after_11-6.log'
   log_interval_batch: 12
   exp_name: "sam2_large"
 
@@ -73,6 +73,6 @@ dataset:
 test:
   use_hq: True
   pred_iou_thresh: 0.5
-  stability_score_thresh: 0.6
-  person_probability_thresh: 0.65
+  stability_score_thresh: 0.5
+  person_probability_thresh: 0.8
 

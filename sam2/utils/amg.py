@@ -136,6 +136,34 @@ def mask_to_rle_pytorch(tensor: torch.Tensor) -> List[Dict[str, Any]]:
         out.append({"size": [h, w], "counts": counts})
     return out
 
+def mask_to_rle_pytorch_one_by_one(tensor: torch.Tensor) -> List[Dict[str, Any]]:
+    b, h, w = tensor.shape
+    out = []
+
+    # Iterate over each mask in the batch
+    for i in range(b):
+        mask = tensor[i].permute(1, 0).flatten()
+        diff = mask[1:] ^ mask[:-1]
+        change_indices = torch.nonzero(diff, as_tuple=False).squeeze(1)
+        if mask[0] == 1:
+            counts = [0]
+        else:
+            counts = []
+        all_change_indices = torch.cat([
+            torch.tensor([0], dtype=change_indices.dtype, device=change_indices.device),
+            change_indices + 1,
+            torch.tensor([h * w], dtype=change_indices.dtype, device=change_indices.device)
+        ])
+        run_lengths = (all_change_indices[1:] - all_change_indices[:-1]).tolist()
+        counts.extend(run_lengths)
+        rle = {
+            "size": [h, w],
+            "counts": counts
+        }
+        out.append(rle)
+
+    return out
+
 
 def rle_to_mask(rle: Dict[str, Any]) -> np.ndarray:
     """Compute a binary mask from an uncompressed RLE."""

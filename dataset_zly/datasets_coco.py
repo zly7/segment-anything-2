@@ -1,3 +1,4 @@
+import math
 import os
 import random
 import time
@@ -10,6 +11,7 @@ import pycocotools.mask as rletools
 import cv2
 from loguru import logger
 from sam2.utils.transforms import SAM2Transforms
+from scipy.ndimage import binary_erosion, binary_dilation
 from .transform_zly import (
     ComposeAPI,
     RandomHorizontalFlip,
@@ -173,8 +175,8 @@ class COCOPersonDataset(Dataset):
 
         # Decode the binary mask
         binary_mask = self.decode_mask(ann)
-
-        ys, xs = np.where(binary_mask)
+        eroded_mask = binary_erosion(binary_mask, structure=np.ones((3, 3)))
+        ys, xs = np.where(eroded_mask)
         if len(ys) == 0:
             logger.warning(f"No pixels found in mask for index {idx} in image {img_path}. the ann is {ann}")
             return self.get_negative_sample(idx)
@@ -222,13 +224,16 @@ class COCOPersonDataset(Dataset):
             combined_exclude_mask = np.zeros((image.shape[0], image.shape[1]), dtype=bool)
 
         # Identify non-person areas
-        non_person_indices = np.where(~combined_exclude_mask)
+        combined_exclude_mask_dilation = binary_dilation(combined_exclude_mask, structure=np.ones((3, 3)))
+        non_person_indices = np.where(~combined_exclude_mask_dilation)
         if non_person_indices[0].size == 0:
-            # If no non-person area, fall back to a positive sample
-            return self.get_positive_sample(idx)
+            logger.warning(f"No non-person pixels found in image {img_path}. Using no dilation")
+            non_person_indices = np.where(~combined_exclude_mask)
+            if non_person_indices[0].size == 0:
+                return self.get_positive_sample(idx)
         
         random_idx = random.randint(0, len(non_person_indices[0]) - 1)
-        click_point = (int(non_person_indices[1][random_idx]), int(non_person_indices[0][random_idx]))
+        click_point = (math.floor(non_person_indices[1][random_idx]), math.floor(non_person_indices[0][random_idx]))
 
         sample = {
             'image_path': img_path,
@@ -270,66 +275,7 @@ class COCOPersonDataset(Dataset):
             # If multiple objects are encoded, take the first channel
             binary_mask = binary_mask[:, :, 0]
         return binary_mask.astype(bool)
-
-    # def process_sample(self, sample):
-    #     """
-    #     Processes the sample by applying transformations, resizing, and converting to tensors.
-
-    #     Args:
-    #         sample (dict): The sample dictionary to process.
-
-    #     Returns:
-    #         dict: The processed sample.
-    #     """
-    #     if self.augment:
-    #         sample = self.transform(sample)
-    #     else:
-    #         # Resize to output size
-    #         if self.use_SAM2_transform:
-    #             sample['image'] = self.sam2_transform(sample['image'])  # Emphasizes color changes
-    #         else:
-    #             sample['image'] = cv2.resize(sample['image'], (self.img_output_size, self.img_output_size),
-    #                                          interpolation=cv2.INTER_LINEAR)
-    #             sample['image'] = torch.from_numpy(sample['image']).permute(2, 0, 1).float()  # (C, H, W)
-
-    #         h_orig, w_orig = sample['mask'].shape[:2]
-    #         sample['mask'] = cv2.resize(sample['mask'].astype(np.uint8), (self.img_output_size, self.img_output_size),
-    #                                    interpolation=cv2.INTER_NEAREST)
-    #         scale_x = self.img_output_size / w_orig
-    #         scale_y = self.img_output_size / h_orig
-    #         sample['click_point'] = (sample['click_point'][0] * scale_x, sample['click_point'][1] * scale_y)
-
-    #     # Convert to tensors
-    #     sample['mask'] = torch.from_numpy(sample['mask']).float()  # (H, W)
-    #     sample['click_point'] = torch.tensor(sample['click_point']).unsqueeze(0).float()  # (1, 2)
-    #     sample['point_label'] = torch.tensor([1.0]).float()  # (1,)
-
-    #     return sample
     
     def process_sample(self, sample):
         sample = self.transform_pipeline(sample)
-        return sample
-    
-    def transform(self, sample):
-        """
-        Applies data augmentation to the sample.
-
-        Args:
-            sample (dict): The sample to augment.
-
-        Returns:
-            dict: The augmented sample.
-        """
-        # Implement your augmentation logic here.
-        # This could include random cropping, flipping, color jittering, etc.
-        # For demonstration, let's apply a simple horizontal flip with 50% probability.
-
-        if random.random() < 0.5:
-            sample['image'] = np.fliplr(sample['image']).copy()
-            sample['mask'] = np.fliplr(sample['mask']).copy()
-            x, y = sample['click_point']
-            sample['click_point'] = (sample['image'].shape[1] - x, y)
-
-        # Add more augmentations as needed.
-
         return sample
