@@ -1,3 +1,4 @@
+import argparse
 import os
 import shutil
 import json
@@ -47,10 +48,9 @@ def evaluate_ap(config, stability_score_thresh, pred_iou_thresh, person_probabil
     )
 
     # Paths to your OCHuman dataset
-    ann_file = "/data2/zly/CrowdSeg/OCHuman/ochuman_coco_format_test_range_0.00_1.00_full_labelled.json"  # Update with the actual path
-    # ann_file = "/data2/zly/CrowdSeg/OCHuman/coco_annotation_first_10.json"
-    # ann_file = "/data2/zly/CrowdSeg/OCHuman/ochuman_coco_format_test_range_0.00_1.00.json"
-    img_dir = "/data2/zly/CrowdSeg/OCHuman/images"  # Update with the actual path
+    # ann_file = "/home/cseadmin/zly/data/OChuman/ochuman_coco_format_test_range_0.00_1.00_full_labelled.json"  # Update with the actual path
+    ann_file = "/home/cseadmin/zly/data/OChuman/ochuman_coco_format_test_range_0.00_1.00.json"
+    img_dir = "/home/cseadmin/zly/data/OChuman/images"  # Update with the actual path
 
     current_datetime = datetime.now()
     current_date_str = current_datetime.date().strftime("%Y-%m-%d")
@@ -84,7 +84,7 @@ def evaluate_ap(config, stability_score_thresh, pred_iou_thresh, person_probabil
     # Initialize the mask generator with hyperparameters
     mask_generator = PedestrainSamAutomaticMaskGenerator(
         model=pedestrian_sam2,
-        points_per_batch=16 * 16,
+        points_per_batch=16 * 16 // 2,
         points_per_side=16,
         pred_iou_thresh=pred_iou_thresh,
         stability_score_thresh=stability_score_thresh,
@@ -178,36 +178,104 @@ def evaluate_ap(config, stability_score_thresh, pred_iou_thresh, person_probabil
 
     return ap
 
-# Define Optuna objective function to optimize hyperparameters
-def objective(trial):
-    # Load the configuration
-    config_path = "./train_config/train_large.yaml"
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
+CONFIG_PATH = "./train_config/train_large_2080.yaml"
 
-    current_stability_score_thresh = config["test"].get("stability_score_thresh", 0.6)
-    current_pred_iou_thresh = config["test"].get("pred_iou_thresh", 0.6)
-    current_person_probability_thresh = config["test"].get("person_probability_thresh", 0.7)
+def parse_args():
+    parser = argparse.ArgumentParser(description="Hyperparameter optimization for OC Human model.")
+    
+    parser.add_argument(
+        "--config_path",
+        type=str,
+        default=CONFIG_PATH,
+        help="Path to the config file"
+    )
+    
+    # Define ranges for stability_score_thresh
+    parser.add_argument(
+        "--stability_score_thresh_range",
+        type=float,
+        nargs=2,
+        metavar=('LOW', 'HIGH'),
+        help="Set lower and upper bounds for stability_score_thresh"
+    )
+    
+    # Define ranges for pred_iou_thresh
+    parser.add_argument(
+        "--pred_iou_thresh_range",
+        type=float,
+        nargs=2,
+        metavar=('LOW', 'HIGH'),
+        help="Set lower and upper bounds for pred_iou_thresh"
+    )
+    
+    # Define ranges for person_probability_thresh
+    parser.add_argument(
+        "--person_probability_thresh_range",
+        type=float,
+        nargs=2,
+        metavar=('LOW', 'HIGH'),
+        help="Set lower and upper bounds for person_probability_thresh"
+    )
+    
+    return parser.parse_args()
+
+def load_config(args):
+    with open(args.config_path, "r") as f:
+        config = yaml.safe_load(f)
+    
+    # Override stability_score_thresh_range if provided
+    if args.stability_score_thresh_range is not None:
+        low, high = args.stability_score_thresh_range
+        if low > high:
+            raise ValueError("stability_score_thresh_range: LOW cannot be greater than HIGH")
+        config["test"]["stability_score_thresh_range"] = [low, high]
+    
+    # Override pred_iou_thresh_range if provided
+    if args.pred_iou_thresh_range is not None:
+        low, high = args.pred_iou_thresh_range
+        if low > high:
+            raise ValueError("pred_iou_thresh_range: LOW cannot be greater than HIGH")
+        config["test"]["pred_iou_thresh_range"] = [low, high]
+    
+    # Override person_probability_thresh_range if provided
+    if args.person_probability_thresh_range is not None:
+        low, high = args.person_probability_thresh_range
+        if low > high:
+            raise ValueError("person_probability_thresh_range: LOW cannot be greater than HIGH")
+        config["test"]["person_probability_thresh_range"] = [low, high]
+    
+    return config
+
+# Define Optuna objective function to optimize hyperparameters
+def objective(trial, config):
+
+    stability_score_thresh_range = config["test"].get("stability_score_thresh_range", [0.5, 0.71])
+    stability_score_thresh_interval = config["test"].get("stability_score_thresh_interval", 0.05)
+
+    pred_iou_thresh_range = config["test"].get("pred_iou_thresh_range", [0.5, 0.71])
+    pred_iou_thresh_interval = config["test"].get("pred_iou_thresh_interval", 0.05)
+
+    person_probability_thresh_range = config["test"].get("person_probability_thresh_range", [0.7, 0.86])
+    person_probability_thresh_interval = config["test"].get("person_probability_thresh_interval", 0.05)
 
     stability_score_thresh = trial.suggest_float(
         "stability_score_thresh",
-        max(0.0, current_stability_score_thresh - 0.2),
-        min(1.0, current_stability_score_thresh + 0.2),
-        step=0.05
+        stability_score_thresh_range[0],
+        stability_score_thresh_range[1],
+        step=stability_score_thresh_interval
     )
 
     pred_iou_thresh = trial.suggest_float(
         "pred_iou_thresh",
-        max(0.0, current_pred_iou_thresh - 0.2),
-        min(1.0, current_pred_iou_thresh + 0.2),
-        step=0.05
+        pred_iou_thresh_range[0],
+        pred_iou_thresh_range[1],
+        step=pred_iou_thresh_interval
     )
-
     person_probability_thresh = trial.suggest_float(
         "person_probability_thresh",
-        max(0.0, current_person_probability_thresh - 0.2),
-        min(1.0, current_person_probability_thresh + 0.2),
-        step=0.05
+        person_probability_thresh_range[0],
+        person_probability_thresh_range[1],
+        step=person_probability_thresh_interval
     )
 
     ap = evaluate_ap(
@@ -221,13 +289,14 @@ def objective(trial):
     return ap
 
 # Function to optimize hyperparameters and display visualizations
-def optimize_hyperparameters(n_trials=50):
+def optimize_hyperparameters(n_trials=50, config=None):
     study = optuna.create_study(
+        study_name="ochuman_optimization",
         direction="maximize",
         storage="sqlite:///optuna_study.db",
         load_if_exists=True
     )
-    study.optimize(objective, n_trials=n_trials)
+    study.optimize(lambda trial: objective(trial, config), n_trials=n_trials)
 
     best_trial = study.best_trial
     print("Best trial parameters:", best_trial.params)
@@ -248,4 +317,6 @@ def optimize_hyperparameters(n_trials=50):
     return best_trial
 
 if __name__ == "__main__":
-    best_trial = optimize_hyperparameters(n_trials=50)
+    args = parse_args()  # 获取命令行参数
+    config = load_config(args)  # 加载配置文件并应用命令行覆盖
+    best_trial = optimize_hyperparameters(n_trials=50, config = config)

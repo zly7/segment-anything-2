@@ -39,6 +39,7 @@ torchrun --nproc_per_node=2 ./pedestrainSAM/trainer_ddp.py --config_path ./train
 
 python3 ./pedestrainSAM/trainer_ddp.py --local_rank 0 --device_index 1 --config_path ./train_config/train_large.yaml
 
+## test_ochuman
 python3 -m pedestrainSAM.test_ochuman
 CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.test_ochuman
 
@@ -67,5 +68,8 @@ pkill -f pedestrainSAM/trainer_ddp.py
 ## test crowdhuman
 CUDA_VISIBLE_DEVICES=0 python -m pedestrainSAM.test_crowdhuman
 
-CUDA_VISIBLE_DEVICES=0 python -m pedestrainSAM.predict_crowdhuman_coco
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.predict_crowdhuman_coco
+
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.generate_training_mask_crowdhuman --end_index 160000
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.generate_training_mask_crowdhuman --start_index 160000
 ```

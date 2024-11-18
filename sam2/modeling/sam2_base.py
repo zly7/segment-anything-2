@@ -471,6 +471,10 @@ class SAM2Base(torch.nn.Module):
         if self.use_high_res_features_in_sam:
             # precompute projected level 0 and level 1 features in SAM decoder
             # to avoid running it again on every SAM click
+            backbone_out["direct_backbone_fpn"] = [
+                backbone_out["backbone_fpn"][0],
+                backbone_out["backbone_fpn"][1],
+            ]
             backbone_out["backbone_fpn"][0] = self.sam_mask_decoder.conv_s0(
                 backbone_out["backbone_fpn"][0]
             )
@@ -494,6 +498,25 @@ class SAM2Base(torch.nn.Module):
         vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
 
         return backbone_out, vision_feats, vision_pos_embeds, feat_sizes
+    
+    def _prepare_backbone_features_direct(self, backbone_out):
+        """Prepare and flatten visual features."""
+        backbone_out = backbone_out.copy()
+        assert len(backbone_out["backbone_fpn"]) == len(backbone_out["vision_pos_enc"])
+        assert len(backbone_out["backbone_fpn"]) >= self.num_feature_levels
+
+        feature_maps = backbone_out["backbone_fpn"][-self.num_feature_levels :]
+        vision_pos_embeds = backbone_out["vision_pos_enc"][-self.num_feature_levels :]
+        feature_maps_direct = backbone_out["direct_backbone_fpn"][-self.num_feature_levels :]
+
+        feat_sizes = [(x.shape[-2], x.shape[-1]) for x in vision_pos_embeds]
+        # flatten NxCxHxW to HWxNxC
+        vision_feats = [x.flatten(2).permute(2, 0, 1) for x in feature_maps]
+        vision_pos_embeds = [x.flatten(2).permute(2, 0, 1) for x in vision_pos_embeds]
+        
+        vision_feats_direct = [x.flatten(2).permute(2, 0, 1) for x in feature_maps_direct]
+
+        return backbone_out, vision_feats, vision_pos_embeds, feat_sizes, vision_feats_direct
 
     def _prepare_memory_conditioned_features(
         self,

@@ -47,6 +47,7 @@ class PedestrainSAM2(nn.Module):
         # Freeze prompt encoder
         for param in self.sam2_model.sam_prompt_encoder.parameters():
             param.requires_grad = False
+        self.use_low_backbone_feature_direct = True
 
     def forward(self, image:Optional[Union[torch.Tensor, np.ndarray]], point_coords = None , point_labels = None, box = None):
         """
@@ -65,7 +66,10 @@ class PedestrainSAM2(nn.Module):
             self._orig_hw = [(image.size(2), image.size(3))] # 对应训练集基本都是已经resize好的image,但是point_coords是1024的绝对坐标
         assert image.shape[1] == 3, "Input image must have 3 channels. current image.shape is {}".format(image.shape)
         _features = self._image_encoder(image)
-        img_embed, high_res_features = _features["image_embed"], _features["high_res_feats"]
+        if self.use_low_backbone_feature_direct:
+            img_embed, high_res_features, direct_high_res_features = _features["image_embed"], _features["high_res_feats"], _features["high_res_feats_direct"]
+        else:
+            img_embed, high_res_features = _features["image_embed"], _features["high_res_feats"]
         mask_input, unnorm_coords, labels, unnorm_box = self._prep_prompts(
             point_coords, point_labels, box, None, normalize_coords=True
         )
@@ -89,6 +93,8 @@ class PedestrainSAM2(nn.Module):
             repeat_image=False,
             high_res_features=high_res_features,
             use_hq = True,
+            use_res_iou = True,
+            direct_high_res_features = direct_high_res_features if self.use_low_backbone_feature_direct else None
         )
         if len(person_logits.size()) == 3 and person_logits.size(1) == 1:
             person_logits = person_logits.squeeze(1)
@@ -98,16 +104,27 @@ class PedestrainSAM2(nn.Module):
 
     def _image_encoder(self, input_image):
         backbone_out = self.sam2_model.forward_image(input_image)
-        _, vision_feats, _, _ = self.sam2_model._prepare_backbone_features(backbone_out)
+        if self.use_low_backbone_feature_direct:
+            _, vision_feats, _, _, vision_feats_direct = self.sam2_model._prepare_backbone_features_direct(backbone_out)
+        else:
+            _, vision_feats, _, _ = self.sam2_model._prepare_backbone_features(backbone_out)
         # Add no_mem_embed, which is added to the lowest res feat. map during training on videos
         if self.sam2_model.directly_add_no_mem_embed:
-            vision_feats[-1] = vision_feats[-1] + self.sam2_model.no_mem_embed
+            vision_feats[-1] = vision_feats[-1] + self.sam2_model.no_mem_embed # 只在最后一层加入embedding
         bb_feat_sizes = [(256, 256), (128, 128), (64, 64)]
         feats = [
             feat.permute(1, 2, 0).view(input_image.size(0), -1, *feat_size)
             for feat, feat_size in zip(vision_feats[::-1], bb_feat_sizes[::-1])
         ][::-1]
-        _features = {"image_embed": feats[-1], "high_res_feats": feats[:-1]}
+        _features = {"image_embed": feats[-1], "high_res_feats": feats[:-1], "high_res_feats_direct": None}
+        if self.use_low_backbone_feature_direct:
+            bb_feat_sizes_direct = [(256, 256), (128, 128)]
+            direct_feats = [
+                feat.permute(1, 2, 0).view(input_image.size(0), -1, *feat_size)
+                for feat, feat_size in zip(vision_feats_direct[::-1], bb_feat_sizes_direct[::-1])
+            ][::-1]
+            _features["high_res_feats_direct"] = direct_feats
+
         return _features
 
     def _prep_prompts(
@@ -162,6 +179,7 @@ class PedestrainSAM2(nn.Module):
         _features = self._image_encoder(input_image)
         self.img_embed = _features["image_embed"]
         self.high_res_features = _features["high_res_feats"]
+        self.direct_high_res_features = _features["high_res_feats_direct"]
         # Compute the dense positional embeddings once
         self.image_pe = self.sam2_model.sam_prompt_encoder.get_dense_pe()
         self.is_img_set = True
@@ -186,6 +204,7 @@ class PedestrainSAM2(nn.Module):
         dense_embeddings=None,
         predict_logit = False,
         use_hq = False,
+        use_res_iou = False
     ):
         """
         Predict masks for the given prompts.
@@ -193,6 +212,7 @@ class PedestrainSAM2(nn.Module):
         # Use stored embeddings
         img_embed = self.img_embed
         high_res_features = self.high_res_features
+        direct_high_res_features = self.direct_high_res_features
         image_pe = self.image_pe
 
         # If embeddings are provided, use them; otherwise compute them
@@ -225,6 +245,8 @@ class PedestrainSAM2(nn.Module):
             repeat_image=repeat_image,
             high_res_features=high_res_features,
             use_hq = use_hq,
+            use_res_iou = use_res_iou,
+            direct_high_res_features = direct_high_res_features if self.use_low_backbone_feature_direct else None
             
         )
         if len(person_logits.size()) == 3 and person_logits.size(1) == 1:
@@ -272,7 +294,7 @@ class FocalDiceIoULoss(nn.Module):
         )
         
         # Dice Loss
-        dice = dice_loss(
+        dice_loss_value = dice_loss(
             mask_logits,
             targets,
             num_objects=targets.size(0),
@@ -285,7 +307,7 @@ class FocalDiceIoULoss(nn.Module):
                 targets = targets.unsqueeze(1)
             if len(mask_logits.size()) == 3:
                 mask_logits = mask_logits.unsqueeze(1) 
-            iou = iou_loss(
+            iou_loss_value = iou_loss(
                 mask_logits,
                 targets,
                 pred_ious=iou_predictions,
@@ -298,10 +320,15 @@ class FocalDiceIoULoss(nn.Module):
 
         # 加权总损失
         total_loss = (self.weight_focal * focal_loss) + \
-                     (self.weight_dice * dice) + \
-                     (self.weight_iou * iou)
-        total_loss = total_loss / self.total_weights
-        return total_loss
+                     (self.weight_dice * dice_loss_value) + \
+                     (self.weight_iou * iou_loss_value)
+        loss_dict = {
+            "total_loss": total_loss,
+            "focal_loss": focal_loss,
+            "dice_loss": dice_loss_value,
+            "iou_loss": iou_loss_value
+        }
+        return total_loss, loss_dict
 
 
 class Trainer:
@@ -331,13 +358,15 @@ class Trainer:
             {"params": list(filter(lambda p: p.requires_grad, missing_keys_params)), "lr": float(config["train"]["learning_rate"]) * config["train"]["lr_multiple_for_new_param"]},  # 10倍学习率
             # {"params": filter(lambda p: p.requires_grad, other_params), "lr": float(config["train"]["learning_rate"])},  # 默认学习率
         ]
+        param_name_map = {param: name for name, param in self.model.named_parameters()}
         # Now print the param_groups for inspection
         for i, group in enumerate(param_groups):
             logger.info(f"Param group {i}:")
             logger.info(f"Learning rate: {group['lr']}")
             logger.info(f"Number of params: {len(group['params'])}")
             for param in group['params']:
-                logger.info(f"Param shape: {param.shape}, requires_grad: {param.requires_grad}")
+                param_name = param_name_map.get(param, "Unknown")
+                logger.info(f"Param name: {param_name}, Param shape: {param.shape}, requires_grad: {param.requires_grad}")
         # Define optimizer
         self.optimizer = optim.AdamW(
             param_groups,
@@ -377,17 +406,19 @@ class Trainer:
     def _load_checkpoint(self):
         """加载检查点文件进行断点续训"""
         checkpoint_path = self.config["model"]["pretrain_model_path"]
-        if self.config["train"]["continue_training"] == False:
+        if self.config["train"]["continue_training"] == False and "sam2.1_hiera_large.pt" in self.config["model"]["pretrain_model_path"]:
             self.start_epoch = 0
-            logger.info("Not resuming training.")
+            logger.info("Not resuming training. Set epoch to 0.")
             return
-        else:
+        elif  ("sam2.1_hiera_large.pt" not in self.config["model"]["pretrain_model_path"]) and self.config["train"]["continue_training"] == True:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
             self.optimizer.load_state_dict(checkpoint["optimizer"])
             self.scheduler.load_state_dict(checkpoint["scheduler"])
-            self.start_epoch = checkpoint["epoch"]
+            self.start_epoch = int(checkpoint["epoch"]) + 1 # 这里的epoch应该要完成的
             self.scaler.load_state_dict(checkpoint["scaler"])
             logger.success(f"Resumed training from epoch {self.start_epoch}")
+        else:
+            raise NotImplementedError
     
     def train(self):
         start_time = time.time()
@@ -400,6 +431,9 @@ class Trainer:
             if self.train_loader.sampler is not None and hasattr(self.train_loader.sampler, 'set_epoch'):
                 self.train_loader.sampler.set_epoch(epoch)
             epoch_loss = 0.0
+            focal_loss_epoch = 0.0
+            dice_loss_epoch = 0.0
+            iou_loss_epoch = 0.0
 
             for batch_idx, batch in enumerate(self.train_loader):
                 global_step += 1
@@ -428,7 +462,7 @@ class Trainer:
                         iou_predictions_person = iou_predictions[person_indices]
                         if len(outputs_person.size()) == 4 and outputs_person.size(1) == 1:
                             outputs_person = outputs_person.squeeze(1)
-                        mask_loss = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
+                        mask_loss, loss_dict = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
 
                     loss = mask_loss + person_loss
                 # Backward and optimize
@@ -439,6 +473,9 @@ class Trainer:
                 self.scaler.update()
                 self.scheduler.step()
                 epoch_loss += loss.item()
+                focal_loss_epoch += loss_dict["focal_loss"].item()
+                dice_loss_epoch += loss_dict["dice_loss"].item()
+                iou_loss_epoch += loss_dict["iou_loss"].item()
 
                 # Logging (only on main process)
                 if batch_idx % self.log_interval_batch == 0 and self.rank == 0:
@@ -476,6 +513,21 @@ class Trainer:
                         person_loss.item(),
                         epoch * len(self.train_loader) + batch_idx,
                     )
+                    self.writer.add_scalar(
+                        "Training/Focal Loss",
+                        loss_dict["focal_loss"].item(),
+                        epoch * len(self.train_loader) + batch_idx,
+                    )
+                    self.writer.add_scalar(
+                        "Training/Dice Loss",
+                        loss_dict["dice_loss"].item(),
+                        epoch * len(self.train_loader) + batch_idx,
+                    )
+                    self.writer.add_scalar(
+                        "Training/IOU Loss",
+                        loss_dict["iou_loss"].item(),
+                        epoch * len(self.train_loader) + batch_idx,
+                    )
 
             if self.config["train"]["validate_first"] == False and ((epoch + 1) % self.valid_epoch == 0):
                 val_loss = self.validate(epoch)
@@ -498,7 +550,13 @@ class Trainer:
 
                 # Record epoch loss
                 avg_epoch_loss = epoch_loss / len(self.train_loader)
+                avg_epoch_loss_focal = focal_loss_epoch / len(self.train_loader)
+                avg_epoch_loss_dice = dice_loss_epoch / len(self.train_loader)
+                avg_epoch_loss_iou = iou_loss_epoch / len(self.train_loader)
                 self.writer.add_scalar("Epoch/Training Loss", avg_epoch_loss, epoch)
+                self.writer.add_scalar("Epoch/Focal Loss", avg_epoch_loss_focal, epoch)
+                self.writer.add_scalar("Epoch/Dice Loss", avg_epoch_loss_dice, epoch)
+                self.writer.add_scalar("Epoch/IOU Loss", avg_epoch_loss_iou, epoch)
                 logger.info(
                     f"Epoch [{epoch+1}/{self.num_epochs}] Training Loss: {avg_epoch_loss:.4f}"
                 )
@@ -509,6 +567,9 @@ class Trainer:
         self.model.eval()
         val_mask_loss = 0.0
         val_person_loss = 0.0
+        val_focal_loss = 0.0
+        val_dice_loss = 0.0
+        val_iou_loss = 0.0
         start_time = time.time()
         total_batches = len(self.val_loader)
         is_person_labels_num = 0
@@ -545,12 +606,14 @@ class Trainer:
                         iou_predictions_person = iou_predictions[person_indices]
                         if len(outputs_person.size()) == 4 and outputs_person.size(1) == 1:
                             outputs_person = outputs_person.squeeze(1)
-                        mask_loss = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
+                        mask_loss, loss_dict = self.criterion(outputs_person, gt_masks_person.float(), iou_predictions_person)
 
                 # Accumulate losses
                 val_mask_loss += mask_loss.item()
                 val_person_loss += person_loss.item()
-                # Compute predicted person labels
+                val_focal_loss += loss_dict["focal_loss"].item()
+                val_dice_loss += loss_dict["dice_loss"].item()
+                val_iou_loss += loss_dict["iou_loss"].item()
                 pred_person_probs = torch.sigmoid(pred_person_logits)
                 pred_person_labels = (pred_person_probs > 0.5).int()
 
@@ -589,6 +652,9 @@ class Trainer:
         # Compute average losses
         val_mask_loss /= len(self.val_loader)
         val_person_loss /= len(self.val_loader)
+        val_focal_loss /= len(self.val_loader)
+        val_dice_loss /= len(self.val_loader)
+        val_iou_loss /= len(self.val_loader)
         val_loss = val_mask_loss + val_person_loss  # Total validation loss
 
         # Aggregate validation losses across all processes
@@ -614,6 +680,9 @@ class Trainer:
             self.writer.add_scalar("Validation/Total Loss", val_loss, epoch)
             self.writer.add_scalar("Validation/Mask Loss", val_mask_loss, epoch)
             self.writer.add_scalar("Validation/Person Loss", val_person_loss, epoch)
+            self.writer.add_scalar("Validation/Focal Loss", val_focal_loss, epoch)
+            self.writer.add_scalar("Validation/Dice Loss", val_dice_loss, epoch)
+            self.writer.add_scalar("Validation/IOU Loss", val_iou_loss, epoch)
 
         return val_loss
 
@@ -817,7 +886,7 @@ def get_dataset(config, dataset_type="train"):
                     enable_negative_sample=True,
                     max_length_for_validate=val_length if dataset_type == "val" else None
                 ))
-            elif dataset_name in ["openimagev7", "coco", "samacoco"]:
+            elif dataset_name in ["openimagev7", "coco", "samacoco", "crowdhuman"]:
                 annotation_file = dataset_config.get("annotation_file", None)
                 datasets.append(COCOPersonDataset(
                     images_dir=dataset_path,
@@ -868,10 +937,13 @@ def main():
     parser.add_argument("--device_index", type=int, default=0)
     args = parser.parse_args()
     print(f"From argument local_rank:{args.local_rank},device_index:{args.device_index}")
+    if 'LOCAL_RANK' in os.environ and args.local_rank is None:
+        logger.info(f"From os.environ LOCAL_RANK:{os.environ['LOCAL_RANK']}")
+        args.local_rank = int(os.environ['LOCAL_RANK'])
     if 'WORLD_SIZE' in os.environ and int(os.environ['WORLD_SIZE']) > 1:
         # DDP 模式
         print(f"!!!!!!!!!!!!!!!!!!!Choose DDP mode,world_size{os.environ['WORLD_SIZE']}!!!!!!!!!!!!!!!!!!!")
-        # dist.init_process_group(backend="nccl", init_method="env://")
+        torch.cuda.set_device(args.local_rank)#理论上torchrun 自动分配
         dist.init_process_group(
             backend="nccl", 
             init_method="tcp://10.16.64.8:29500",  # 主节点的 IP 和端口
@@ -879,8 +951,6 @@ def main():
             rank=int(os.environ['RANK'])
         )
         dist.barrier()
-        args.local_rank = dist.get_rank() # args.local_rank有问题,多机不能这样做
-        torch.cuda.set_device(args.local_rank)#理论上torchrun 自动分配
         device_index =args.local_rank
         rank = dist.get_rank()
         world_size = dist.get_world_size()

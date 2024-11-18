@@ -108,6 +108,9 @@ class MaskDecoder(nn.Module):
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
         self.person_classifier_mlp = MLP(transformer_dim, transformer_dim, 1, 3)
         self.person_classifier_token = nn.Embedding(1, transformer_dim)
+        
+        #res-iou
+        self.res_iou_mlp = MLP(transformer_dim*2, transformer_dim, 1, 3)
 
         # HQ-SAM parameters #hq
         self.hq_token = nn.Embedding(1, transformer_dim)  # HQ-Output-Token #hq
@@ -124,17 +127,17 @@ class MaskDecoder(nn.Module):
 
         
         self.compress_feature_1 = nn.Sequential(
-            nn.ConvTranspose2d(transformer_dim // 4, transformer_dim // 4, kernel_size=2, stride=2),
-            LayerNorm2d(transformer_dim //4),  
+            nn.ConvTranspose2d(transformer_dim , transformer_dim // 2, kernel_size=2, stride=2),
+            LayerNorm2d(transformer_dim //2),  
             nn.GELU(),
-            nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1),
+            nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
         )  
 
-        self.compress_feature_0 = nn.Sequential( # 这里感受野就是3x3
-            nn.Conv2d(transformer_dim // 8, transformer_dim // 4, 3, 1, 1),
-            LayerNorm2d(transformer_dim // 4 ),
+        self.compress_feature_0 = nn.Sequential( # 这里感受野就是3x3,这里是不是要大一点的感受野存疑，但是我感觉主要就是要针对比较小的物体的预测
+            nn.Conv2d(transformer_dim, transformer_dim // 2, 3, 1, 1),
+            LayerNorm2d(transformer_dim // 2),
             nn.GELU(),
-            nn.Conv2d(transformer_dim // 4, transformer_dim // 8, 3, 1, 1),
+            nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
         )
 
 
@@ -148,6 +151,8 @@ class MaskDecoder(nn.Module):
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
         use_hq: bool = False,  #hq
+        use_res_iou: bool = False,  
+        direct_high_res_features: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
@@ -172,7 +177,9 @@ class MaskDecoder(nn.Module):
             dense_prompt_embeddings=dense_prompt_embeddings,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
-            use_hq = use_hq
+            use_hq = use_hq,
+            use_res_iou = use_res_iou,
+            direct_high_res_features= direct_high_res_features,
         )
 
         # HQ-SAM mask selection logic 
@@ -206,6 +213,8 @@ class MaskDecoder(nn.Module):
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
         use_hq = False,  #[b,256,64,64]
+        use_res_iou = False,
+        direct_high_res_features: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details. 内部函数没有其它地方调用"""
         # Concatenate output tokens
@@ -273,8 +282,8 @@ class MaskDecoder(nn.Module):
         # HQ-SAM upscaled embeddings #hq
         upscaled_embedding_sam = upscaled_embedding  #hq
         if use_hq is True:  #hq
-            feat_s0, feat_s1 = high_res_features
-            upscaled_embedding_hq = self.compress_feature_2(src) + self.compress_feature_1(feat_s1) + self.compress_feature_0(feat_s0)  #hq
+            d_feat_s0, d_feat_s1 = direct_high_res_features
+            upscaled_embedding_hq = self.compress_feature_2(src) + self.compress_feature_1(d_feat_s1) + self.compress_feature_0(d_feat_s0)  #hq
 
         # Generate mask predictions
         hyper_in_list: List[torch.Tensor] = []
@@ -300,7 +309,12 @@ class MaskDecoder(nn.Module):
             masks = masks_sam 
 
         # Generate mask quality predictions
+
         iou_pred = self.iou_prediction_head(iou_token_out)
+        if use_res_iou:
+            res_iou_token = torch.cat([iou_token_out.unsqueeze(1).repeat(1,4,1), mask_tokens_out[:,:4]], dim=-1)
+            res_iou = self.res_iou_mlp(res_iou_token)
+            iou_pred = iou_pred + res_iou.squeeze(-1)
         if self.pred_obj_scores:
             assert s == 1
             object_score_logits = self.pred_obj_score_head(hs[:, 0, :])

@@ -54,7 +54,7 @@ def main():
     current_date_str = current_datetime.date().strftime("%Y-%m-%d")
     # which_to_replace_img_dir = "pred_images_" + current_date_str + "finetune_all_parameter"
     # which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test_no_filter"
-    which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_finetune_all_test"
+    which_to_replace_img_dir = "pred_images_" + current_date_str + "hq_resiou_finetune_all_test"
     output_base_dir = img_dir.replace("images", which_to_replace_img_dir)
     if os.path.exists(output_base_dir):
         shutil.rmtree(os.path.join(output_base_dir,"code"))
@@ -92,9 +92,12 @@ def main():
         min_mask_region_area=100,  # Requires OpenCV for post-processing
         person_probability_thresh=config["test"]["person_probability_thresh"],
         vis=True,  # Set to True if you want to save visualizations
-        vis_immediate_folder=which_to_replace_img_dir,
+        vis_detailed_process_prabability=1.0,
+        replaced_immediate_path="images",
+        vis_immediate_folder_to_replace_images= which_to_replace_img_dir,
         loguru_path=f"./logs/ochuman_test/{current_date_str}.log",
         use_hq = config["test"]["use_hq"],
+        use_res_iou=config["test"]["use_res_iou"],
     )
 
     # Load the ground truth annotations

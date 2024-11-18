@@ -91,6 +91,7 @@ def main():
         shutil.rmtree(os.path.join(output_base_dir, "code"))
     shutil.copytree("./pedestrainSAM", os.path.join(output_base_dir,"code", "pedestrainSAM")) # 保存一些代码
     shutil.copytree("./sam2", os.path.join(output_base_dir,"code", "sam2"))
+    shutil.copytree("./train_config", os.path.join(output_base_dir,"code", "train_config"))
     shutil.copy(config_path, os.path.join(config["train"]["save_path"], os.path.basename(config_path)))
         
     if not os.path.exists(output_base_dir):
@@ -124,7 +125,7 @@ def main():
         min_mask_region_area=100,
         person_probability_thresh=config["test"]["person_probability_thresh"],
         vis = True,
-        vis_detailed_process_prabability=0.1,
+        vis_detailed_process_prabability=0.0,
         replaced_immediate_path="Images",
         vis_immediate_folder_to_replace_images= replace_date_str,
         vis_resize_width= 1280,

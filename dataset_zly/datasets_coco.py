@@ -119,6 +119,7 @@ class COCOPersonDataset(Dataset):
         if self.max_length_for_validate is not None and self.max_length_for_validate > 0:
             random.shuffle(self.data)
             self.data = self.data[:self.max_length_for_validate]
+            logger.info(f"Using {len(self.data)} samples for validation.")
 
     def __len__(self):
         """

@@ -67,6 +67,7 @@ class PedestrainSamAutomaticMaskGenerator:
         vis_resize_width = -1,
         loguru_path: str = "./",
         use_hq = False,
+        use_res_iou = False
     ) -> None:
         """
         Using a SAM model, generates masks for the entire image.
@@ -159,6 +160,7 @@ class PedestrainSamAutomaticMaskGenerator:
         self.replaced_immediate_path = replaced_immediate_path
         self.vis_immediate_folder_to_replace_images = vis_immediate_folder_to_replace_images
         self.use_hq = use_hq
+        self.use_res_iou = use_res_iou
         self.vis_resize_width = vis_resize_width
         logger.add(loguru_path, rotation="1 day", retention="7 days", level="DEBUG")
 
@@ -359,6 +361,7 @@ class PedestrainSamAutomaticMaskGenerator:
             dense_embeddings=dense_embeddings,
             predict_logit=True,
             use_hq=self.use_hq,
+            use_res_iou=self.use_res_iou,
         )        
         sigmoid_person_logits = torch.sigmoid(person_logits.flatten(0, 1))
         data = MaskData(
