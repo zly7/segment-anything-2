@@ -6,7 +6,7 @@ from datetime import datetime
 import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from pycocotools import mask as mask_utils
+from pycocotools import mask as mask_utils  # Ensure this is imported
 from PIL import Image
 import yaml
 
@@ -17,7 +17,7 @@ from .automask_from_sam1 import PedestrainSamAutomaticMaskGenerator
 from PIL import Image
 from loguru import logger
 class CrowdHumanDataset(torch.utils.data.Dataset):
-    def __init__(self, coco_json_path, images_dir, transform=None, width_resize = 1920.0):
+    def __init__(self, coco_json_path, images_dir, transform=None, width_resize=1920.0):
         self.images_dir = images_dir
         self.transform = transform
         with open(coco_json_path, "r") as f:
@@ -89,11 +89,11 @@ def main():
     output_base_dir = img_dir.replace("Images", replace_date_str)
     if os.path.exists(os.path.join(output_base_dir, "code")):
         shutil.rmtree(os.path.join(output_base_dir, "code"))
-    shutil.copytree("./pedestrainSAM", os.path.join(output_base_dir,"code", "pedestrainSAM")) # 保存一些代码
-    shutil.copytree("./sam2", os.path.join(output_base_dir,"code", "sam2"))
-    shutil.copytree("./train_config", os.path.join(output_base_dir,"code", "train_config"))
+    shutil.copytree("./pedestrainSAM", os.path.join(output_base_dir, "code", "pedestrainSAM"))  # 保存一些代码
+    shutil.copytree("./sam2", os.path.join(output_base_dir, "code", "sam2"))
+    shutil.copytree("./train_config", os.path.join(output_base_dir, "code", "train_config"))
     shutil.copy(config_path, os.path.join(config["train"]["save_path"], os.path.basename(config_path)))
-        
+
     if not os.path.exists(output_base_dir):
         os.makedirs(output_base_dir)
 
@@ -116,21 +116,26 @@ def main():
     # Initialize the mask generator
     mask_generator = PedestrainSamAutomaticMaskGenerator(
         model=pedestrian_sam2,
-        points_per_batch=32 * 32 // 2,  # Adjust based on your GPU memory
-        points_per_side=32,
+        device=device,
+        points_per_batch=64 * 64 // 8,  # Adjust based on your GPU memory
+        points_per_side=64,
         pred_iou_thresh=config["test"]["pred_iou_thresh"],
         stability_score_thresh=config["test"]["stability_score_thresh"],
         crop_n_layers=0,
         crop_n_points_downscale_factor=2,
         min_mask_region_area=100,
         person_probability_thresh=config["test"]["person_probability_thresh"],
-        vis = True,
+        mask_selection="max_iou_k",
+        max_iou_k=64 * 8 // 4, # 前25%保留
+        output_mode="coco_rle",
+        vis=False, # 放在最后可视化
         vis_detailed_process_prabability=0.0,
         replaced_immediate_path="Images",
-        vis_immediate_folder_to_replace_images= replace_date_str,
-        vis_resize_width= 1280,
+        vis_immediate_folder_to_replace_images=replace_date_str,
+        vis_resize_width=1280,
         loguru_path=f"./logs/crowdhuman_test/{datetime.now().date().strftime('%Y-%m-%d')}.log",
         use_hq=config["test"]["use_hq"],
+        use_res_iou=config["test"]["use_res_iou"],
     )
 
     coco_predictions = []
@@ -155,20 +160,22 @@ def main():
         })
 
         # Compute the scale factor used during resizing
-        scale = test_dataset.width_resize / orig_width
+        scale = test_dataset.width_resize / max(orig_width, orig_height)
 
         # Generate masks for the image
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             masks = mask_generator.generate(image_np, image_abs_path)
 
-        image_id_val = image_id[0].item()
+        image_id_val = image_id.item()
         for mask in masks:
             bbox_resized = mask['bbox']  # [x, y, w, h] in resized image
             score = mask['predicted_iou']  # Use predicted IoU as the confidence score
+            stability_score = mask['stability_score'] #mask.get('stability_score', 0.0)  # Extract stability_score
+            person_probability = mask['person_probability'] #mask.get('person_probability', 0.0)  # Extract person_probability
 
             # Rescale bbox to original image size
             bbox_original = [coord / scale for coord in bbox_resized]  # [x, y, w, h]
-            
+
             # Ensure bbox is within original image boundaries
             x, y, w, h = bbox_original
             if x < 0 or y < 0 or (x + w) > orig_width or (y + h) > orig_height:
@@ -177,12 +184,21 @@ def main():
                     f"rescaled to {bbox_original} exceeds image boundaries ({orig_width}, {orig_height}). "
                     f"Clipping the bbox to fit within the image."
                 )
-            bbox_original = [round(coord, 2) for coord in [x, y, w, h]]
+                # Clip the bbox to fit within the image
+                x = max(x, 0)
+                y = max(y, 0)
+                w = min(w, orig_width - x)
+                h = min(h, orig_height - y)
+                bbox_original = [round(coord, 2) for coord in [x, y, w, h]]
+            else:
+                bbox_original = [round(coord, 2) for coord in [x, y, w, h]]
 
             # Calculate area
             area = round(w * h, 2)
 
-            # Prepare annotation dictionary without 'segmentation'
+            segmentation = mask['segmentation']
+
+            # Prepare annotation dictionary with 'segmentation' and 'stability_score'
             pred = {
                 'id': annotation_id,
                 'image_id': image_id_val,
@@ -191,6 +207,9 @@ def main():
                 'score': round(score, 4),
                 'area': area,
                 'iscrowd': 0,
+                'segmentation': segmentation,  # Add RLE segmentation
+                'stability_score': round(stability_score, 4),  # Add stability_score
+                'person_probability': round(person_probability, 4)  # Add person_probability
             }
             coco_predictions.append(pred)
             annotation_id += 1
@@ -206,6 +225,12 @@ def main():
                 'score': 0.0,
                 'area': 1,
                 'iscrowd': 0,
+                'segmentation': {
+                    'counts': [0],
+                    'size': [1, 1]
+                },  # Minimal RLE
+                'stability_score': 0.0,
+                'person_probability': 0.0
             }
             coco_predictions.append(pred)
             annotation_id += 1
@@ -247,3 +272,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

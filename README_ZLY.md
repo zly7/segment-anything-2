@@ -69,6 +69,7 @@ pkill -f pedestrainSAM/trainer_ddp.py
 CUDA_VISIBLE_DEVICES=0 python -m pedestrainSAM.test_crowdhuman
 
 CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.predict_crowdhuman_coco
+CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.predict_crowdhuman_coco_optuna
 
 CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.generate_training_mask_crowdhuman --end_index 160000
 CUDA_VISIBLE_DEVICES=1 python -m pedestrainSAM.generate_training_mask_crowdhuman --start_index 160000

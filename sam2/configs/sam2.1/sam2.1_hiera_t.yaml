@@ -13,6 +13,9 @@ model:
       stages: [1, 2, 7, 2]
       global_att_blocks: [5, 7, 9]
       window_pos_embed_bkg_spatial_size: [7, 7]
+      lora_enabled: True  # Enable or disable LoRA
+      lora_r: 4           # Adjust the rank of the LoRA matrices
+      lora_alpha: 1.0     # Scaling factor for LoRA
     neck:
       _target_: sam2.modeling.backbones.image_encoder.FpnNeck
       position_encoding:
@@ -94,6 +97,8 @@ model:
   # Memory
   directly_add_no_mem_embed: true
   no_obj_embed_spatial: true
+  # Mask decoder
+  use_hq: False
   # use high-resolution feature map in the SAM mask decoder
   use_high_res_features_in_sam: true
   # output 3 masks on the first click on initial conditioning frames

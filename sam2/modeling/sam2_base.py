@@ -40,6 +40,7 @@ class SAM2Base(torch.nn.Module):
         # on the first frame, whether to directly add the no-memory embedding to the image feature
         # (instead of using the transformer encoder)
         directly_add_no_mem_embed=False,
+        use_hq=False,
         # whether to use high-resolution feature maps in the SAM mask decoder
         use_high_res_features_in_sam=False,
         # whether to output multiple (3) masks for the first click on initial conditioning frames
@@ -99,6 +100,7 @@ class SAM2Base(torch.nn.Module):
         # Part 1: the image backbone
         self.image_encoder = image_encoder
         # Use level 0, 1, 2 for high-res setting, or just level 2 for the default setting
+        self.use_hq = use_hq
         self.use_high_res_features_in_sam = use_high_res_features_in_sam
         self.num_feature_levels = 3 if use_high_res_features_in_sam else 1
         self.use_obj_ptrs_in_encoder = use_obj_ptrs_in_encoder
@@ -232,6 +234,7 @@ class SAM2Base(torch.nn.Module):
             iou_head_depth=3,
             iou_head_hidden_dim=256,
             use_high_res_features=self.use_high_res_features_in_sam,
+            use_hq = self.use_hq,
             iou_prediction_use_sigmoid=self.iou_prediction_use_sigmoid,
             pred_obj_scores=self.pred_obj_scores,
             pred_obj_scores_mlp=self.pred_obj_scores_mlp,
@@ -347,7 +350,6 @@ class SAM2Base(torch.nn.Module):
             ious,
             sam_output_tokens,
             object_score_logits,
-            person_logits,
         ) = self.sam_mask_decoder(
             image_embeddings=backbone_features,
             image_pe=self.sam_prompt_encoder.get_dense_pe(),

@@ -1,36 +1,57 @@
 model:
-  model_config: "sam2_hiera_l.yaml"
+  # model_config: "sam2.1_hiera_l.yaml"
+  # model_config: "./configs/sam2.1/sam2.1_hiera_l.yaml"
   # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_large.pt"
+  # model_config: "./configs/sam2.1/sam2.1_hiera_s.yaml"
+  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_small.pt"
+  model_config: "./configs/sam2.1/sam2.1_hiera_t.yaml"
+  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_tiny.pt"
+  # model_config: "./configs/sam2.1/sam2.1_hiera_b+.yaml"
+  # pretrain_model_path: "/data3/zly/multi_ob/segment-anything-2/checkpoints/sam2.1_hiera_base_plus.pt"
   # pretrain_model_path: "/data2/zly/training/2024-11-02-22-57/model_epoch_12.pth"
   # pretrain_model_path: "/data2/zly/training/2024-11-07-20-29/model_epoch_3.pth"
   # pretrain_model_path: "/data2/zly/training/2024-11-12-11-21/model_epoch_5.pth"  # 2024-11-12修改了loss函数和res_iou_head的
   # pretrain_model_path: "/data2/zly/training/2024-11-17-00-15/model_epoch_2.pth" # 2024-11-18添加了crodhuman的模型
+  # pretrain_model_path: "/data2/zly/training/2024-11-17-00-15/model_epoch_3.pth" # 2024-11-18 查看什么loss比较大
+  # pretrain_model_path: "/data2/zly/training/2024-11-29-09-53/model_epoch_1.pth"
+  pretrain_model_path: "/data2/zly/training/2024-12-24-22-53/model_epoch_1.pth"
+  pretrain_classfier_path: "/data3/zly/segpersonclass/runs_shuffle/experiment1/best_ckpt_24.pt"
   trainable_layers:
-    - "sam_mask_decoder.person_classifier_mlp.layers"
-    - "sam_mask_decoder.person_classifier_token"
-    - "sam_mask_decoder.hq_token"
-    - "sam_mask_decoder.hf_mlp.layers"
-    - "sam_mask_decoder.compress_feature_2"
-    - "sam_mask_decoder.compress_feature_1"
-    - "sam_mask_decoder.compress_feature_0"
-    - "sam_mask_decoder.res_iou_mlp"
+    # - "sam_mask_decoder.person_classifier_mlp.layers"
+    # - "sam_mask_decoder.person_classifier_token"
+    # - "sam_mask_decoder.hq_token"
+    # - "sam_mask_decoder.hf_mlp.layers"
+    # - "sam_mask_decoder.compress_feature_2"
+    # - "sam_mask_decoder.compress_feature_1"
+    # - "sam_mask_decoder.compress_feature_0"
+    # - "sam_mask_decoder.res_iou_mlp"
+    - "lora"
+    - "sam_mask_decoder"
+    # - "iou_prediction_head"
+    - "sam_prompt_encoder"
+    # - "image_encoder"
+    # - "all"
+  use_low_backbone_feature_direct: False
 train:
-  learning_rate: 3e-5
-  weight_decay: 0.1
+  learning_rate: 1e-5
+  learning_rate_for_classifier: 1e-5
+  weight_decay: 0.05
   warm_up_step_ratio: 0.05
-  max_norm: 0.1
-  num_epochs: 5
+  max_norm: 0.5
+  num_epochs: 3
   save_path: '/data2/zly/training/'
-  batch_size_one_gpu: 32
+  batch_size_one_gpu: 16
   validate_first: False
   num_workers_dataloader: 16
   transfer_image_in_dataset_use_sam2: True
   valid_every_train_epoch: 1
   continue_training: False
-  lr_multiple_for_new_param: 10
+  lr_multiple_for_new_param: 2
+  vis_for_classfier_image: False
+  multimask: True
 log:
   tensorboard_log_dir: './logs_tensorboard'
-  loguru_log_file: './logs/train/training_cuda_data_mix_after_11-11.log'
+  loguru_log_file: './logs/train/training_12-26.log'
   log_interval_batch: 12
   exp_name: "sam2_large"
 
@@ -58,19 +79,24 @@ dataset:
   train_datasets:
     - name: MOTS
       path: "/data2/zly/mots_data/MOTS2020/train"
-      ratio: 0.05
+      ratio: 0.02
     - name: samacoco
       path: "/data3/zly/samacoco/samacocoperson/data"
-      annotation_file: "/data3/zly/samacoco/samacocoperson/labels.json"
+      # annotation_file: "/data3/zly/samacoco/samacocoperson/labels.json"
+      annotation_file: "/data3/zly/samacoco/samacocoperson/labels_clean.json"
+      # annotation_file: "/data3/zly/samacoco/samacocoperson/labels_clean_5_percent.json"
       ratio: 1
     - name: crowdhuman
-      path: "/data2/zly/mot_data/crowdhuman/Images"
-      annotation_file: "/data2/zly/mot_data/crowdhuman/selected_filter_auto_mask_cw_train_split.json"
+      path: "/data3/zly/crowdhuman/Images"
+      # annotation_file: "/data2/zly/mot_data/crowdhuman/selected_filter_auto_mask_cw_train_split.json"
+      # annotation_file: "/data2/zly/mot_data/crowdhuman/selected_filter_auto_mask_cw_train_split_with_nonperson_mask.json"
+      annotation_file: "/data3/zly/crowdhuman/selected_filter_auto_mask_cw_train_split_with_nonperson_mask_clean.json"
+      # annotation_file: "/data3/zly/crowdhuman/selected_filter_auto_mask_cw_train_split_with_nonperson_mask_clean_5_percent.json"
       ratio: 1
   val_datasets:
     - name: MOTS
       path: "/data2/zly/mots_data/MOTS2020/train"
-      ratio: 0.05
+      ratio: 0.02
       val_lenth: 1024
     - name: samacoco
       path: "/data3/zly/samacoco/samacocoperson_valid/data"
@@ -85,7 +111,10 @@ dataset:
 test:
   use_hq: True
   use_res_iou: True
-  pred_iou_thresh: 0.3
-  stability_score_thresh: 0.6
-  person_probability_thresh: 0.8
+  stability_score_thresh_range: [0.7, 0.7]
+  stability_score_thresh_interval: 0.1
+  pred_iou_thresh_range: [0.7, 0.7]
+  pred_iou_thresh_interval: 0.1
+  person_probability_thresh_range: [0.5, 0.5]
+  person_probability_thresh_interval: 0.05
 

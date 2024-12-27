@@ -1,3 +1,4 @@
+# hieradet.py
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 # All rights reserved.
 
@@ -5,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 from functools import partial
 from typing import List, Tuple, Union
 
@@ -43,6 +45,9 @@ class MultiScaleAttention(nn.Module):
         dim_out: int,
         num_heads: int,
         q_pool: nn.Module = None,
+        lora_enabled: bool = False,
+        lora_r: int = 4,
+        lora_alpha: float = 1.0,
     ):
         super().__init__()
 
@@ -53,22 +58,86 @@ class MultiScaleAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim_out * 3)
         self.proj = nn.Linear(dim_out, dim_out)
 
+        self.lora_enabled = lora_enabled
+        if self.lora_enabled:
+            self.lora_r = lora_r
+            self.lora_alpha = lora_alpha
+            self.lora_scaling = self.lora_alpha / self.lora_r
+
+            # Separate LoRA parameters for Q, K, V
+            self.lora_q_A = nn.Parameter(torch.zeros(self.lora_r, dim))
+            self.lora_q_B = nn.Parameter(torch.zeros(dim_out, self.lora_r))
+
+            self.lora_k_A = nn.Parameter(torch.zeros(self.lora_r, dim))
+            self.lora_k_B = nn.Parameter(torch.zeros(dim_out, self.lora_r))
+
+            self.lora_v_A = nn.Parameter(torch.zeros(self.lora_r, dim))
+            self.lora_v_B = nn.Parameter(torch.zeros(dim_out, self.lora_r))
+
+            # Initialize LoRA parameters
+            nn.init.kaiming_uniform_(self.lora_q_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_q_B)
+            nn.init.kaiming_uniform_(self.lora_k_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_k_B)
+            nn.init.kaiming_uniform_(self.lora_v_A, a=math.sqrt(5))
+            nn.init.zeros_(self.lora_v_B)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, H, W, _ = x.shape
-        # qkv with shape (B, H * W, 3, nHead, C)
-        qkv = self.qkv(x).reshape(B, H * W, 3, self.num_heads, -1)
+        x_flat = x.reshape(B * H * W, -1)  # [B*H*W, dim]
+
+        # Compute qkv: [B*H*W, 3 * dim_out]
+        qkv = self.qkv(x).reshape(B * H * W, 3, self.dim_out)
+
+        if self.lora_enabled:
+            # # LoRA for Q
+            # lora_q = x_flat @ self.lora_q_A.t()  # [B*H*W, lora_r]
+            # lora_q = lora_q @ self.lora_q_B.t()  # [B*H*W, dim_out]
+            # lora_q = lora_q * self.lora_scaling
+
+            # # LoRA for K
+            # lora_k = x_flat @ self.lora_k_A.t()  # [B*H*W, lora_r]
+            # lora_k = lora_k @ self.lora_k_B.t()  # [B*H*W, dim_out]
+            # lora_k = lora_k * self.lora_scaling
+
+            # # LoRA for V
+            # lora_v = x_flat @ self.lora_v_A.t()  # [B*H*W, lora_r]
+            # lora_v = lora_v @ self.lora_v_B.t()  # [B*H*W, dim_out]
+            # lora_v = lora_v * self.lora_scaling
+
+            # # Add LoRA updates to qkv
+            # qkv[:, 0, :] += lora_q  # Update Q
+            # qkv[:, 1, :] += lora_k  # Update K
+            # qkv[:, 2, :] += lora_v  # Update V
+            # Combine all LoRA matrices into 3D tensors for batch operations
+            lora_A = torch.stack([self.lora_q_A, self.lora_k_A, self.lora_v_A])  # [3, lora_r, dim]
+            lora_B = torch.stack([self.lora_q_B, self.lora_k_B, self.lora_v_B])  # [3, dim_out, lora_r]
+
+            # Compute LoRA updates using batch matrix multiplication
+            # Step 1: x_flat [B*H*W, dim] @ lora_A.transpose(-1, -2) [3, dim, lora_r] -> [B*H*W, 3, lora_r]
+            lora_intermediate = torch.einsum('bd,nrd->bnr', x_flat, lora_A)  # [B*H*W, 3, lora_r]
+
+            # Step 2: lora_intermediate [B*H*W, 3, lora_r] @ lora_B.transpose(-1, -2) [3, lora_r, dim_out] -> [B*H*W, 3, dim_out]
+            lora_updates = torch.einsum('bnr,nro->bno', lora_intermediate, lora_B.transpose(1, 2))  # [B*H*W, 3, dim_out]
+
+            # Scale LoRA updates
+            lora_updates *= self.lora_scaling
+            # Add updates to qkv
+            qkv += lora_updates.view(qkv.shape)
+
+        qkv = qkv.view(B, H * W, 3, self.num_heads, -1)
         # q, k, v with shape (B, H * W, nheads, C)
-        q, k, v = torch.unbind(qkv, 2)
+        q, k, v = torch.unbind(qkv, dim=2)
 
         # Q pooling (for downsample at stage changes)
         if self.q_pool:
             q = do_pool(q.reshape(B, H, W, -1), self.q_pool)
-            H, W = q.shape[1:3]  # downsampled shape
+            H, W = q.shape[1:3]  # Downsampled shape
             q = q.reshape(B, H * W, self.num_heads, -1)
 
-        # Torch's SDPA expects [B, nheads, H*W, C] so we transpose
+        # Torch's scaled dot-product attention expects [B, nheads, H*W, C]
         x = F.scaled_dot_product_attention(
-            q.transpose(1, 2),
+            q.transpose(1, 2),  # [B, nheads, H*W, C]
             k.transpose(1, 2),
             v.transpose(1, 2),
         )
@@ -93,6 +162,9 @@ class MultiScaleBlock(nn.Module):
         q_stride: Tuple[int, int] = None,
         act_layer: nn.Module = nn.GELU,
         window_size: int = 0,
+        lora_enabled: bool = False,
+        lora_r: int = 4,
+        lora_alpha: float = 1.0,
     ):
         super().__init__()
 
@@ -116,6 +188,9 @@ class MultiScaleBlock(nn.Module):
             dim_out,
             num_heads=num_heads,
             q_pool=self.pool,
+            lora_enabled=lora_enabled,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
         )
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
@@ -197,6 +272,9 @@ class Hiera(nn.Module):
         ),
         weights_path=None,
         return_interm_layers=True,  # return feats from every stage
+        lora_enabled: bool = False,
+        lora_r: int = 4,
+        lora_alpha: float = 1.0,
     ):
         super().__init__()
 
@@ -232,6 +310,10 @@ class Hiera(nn.Module):
         cur_stage = 1
         self.blocks = nn.ModuleList()
 
+        self.lora_enabled = lora_enabled
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+
         for i in range(depth):
             dim_out = embed_dim
             # lags by a block, so first block of
@@ -254,6 +336,9 @@ class Hiera(nn.Module):
                 drop_path=dpr[i],
                 q_stride=self.q_stride if i in self.q_pool_blocks else None,
                 window_size=window_size,
+                lora_enabled=self.lora_enabled,
+                lora_r=self.lora_r,
+                lora_alpha=self.lora_alpha,
             )
 
             embed_dim = dim_out

@@ -89,8 +89,9 @@ def sigmoid_focal_loss(
         # loss is [N, M, H, W] where M corresponds to multiple predicted masks
         assert loss.dim() == 4
         return loss.flatten(2).mean(-1) / num_objects  # average over spatial dims
-    if inputs.dim() == 3 and targets.dim() == 3: # 原作者默认维度是[b,1,h,w]
-        loss = loss.flatten(1)
+    else:
+        if inputs.dim() == 3 and targets.dim() == 3: # 原作者默认维度是[b,1,h,w]
+            loss = loss.flatten(1)
     return loss.mean(1).sum() / num_objects
 
 

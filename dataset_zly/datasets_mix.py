@@ -69,6 +69,43 @@ class CombinedDataset(Dataset):
                 raise ValueError(f"辅助数据集 {aux_dataset_idx} 为空，无法采样。")
             sample_idx = random.randint(0, len(chosen_aux_dataset) - 1)
             return chosen_aux_dataset[sample_idx]
+    
+    def get_certain_sample(self, index, positive=True):
+        """
+        用于从所有数据集中获取正样本的方法。
+
+        Args:
+            index (int): 全局索引。
+
+        Returns:
+            dict: 正样本字典。
+        """
+        if index < self.total_main_length:
+            # 找到对应的主数据集及其在该数据集中的局部索引
+            dataset_idx = self._find_main_dataset(index)
+            if dataset_idx == 0:
+                local_idx = index
+            else:
+                local_idx = index - self.main_cumulative_lengths[dataset_idx - 1]
+            if positive:
+                return self.main_datasets[dataset_idx].get_positive_sample(local_idx)
+            else:
+                return self.main_datasets[dataset_idx].get_negative_sample(local_idx)
+        else:
+            aux_index = index - self.total_main_length
+            for aux_dataset_idx, num_samples in enumerate(self.num_auxiliary_samples):
+                if aux_index < num_samples:
+                    chosen_aux_dataset = self.auxiliary_datasets[aux_dataset_idx]
+                    break
+                aux_index -= num_samples
+            else:
+                chosen_aux_dataset = self.auxiliary_datasets[-1]
+                aux_index = len(self.auxiliary_datasets[-1]) - 1
+            sample_idx = random.randint(0, len(chosen_aux_dataset) - 1)
+            if positive:
+                return chosen_aux_dataset.get_positive_sample(sample_idx)
+            else:
+                return chosen_aux_dataset.get_negative_sample(sample_idx)
 
     def _find_main_dataset(self, index):
         """

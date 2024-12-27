@@ -66,8 +66,6 @@ class PedestrainSamAutomaticMaskGenerator:
         vis_immediate_folder_to_replace_images = "pred_images",
         vis_resize_width = -1,
         loguru_path: str = "./",
-        use_hq = False,
-        use_res_iou = False
     ) -> None:
         """
         Using a SAM model, generates masks for the entire image.
@@ -113,7 +111,6 @@ class PedestrainSamAutomaticMaskGenerator:
             For large resolutions, 'binary_mask' may consume large amounts of
             memory.
         """
-
         assert (points_per_side is None) != (
             point_grids is None
         ), "Exactly one of points_per_side or point_grid must be provided."
@@ -159,8 +156,6 @@ class PedestrainSamAutomaticMaskGenerator:
         self.vis_detailed_process_prabability = vis_detailed_process_prabability
         self.replaced_immediate_path = replaced_immediate_path
         self.vis_immediate_folder_to_replace_images = vis_immediate_folder_to_replace_images
-        self.use_hq = use_hq
-        self.use_res_iou = use_res_iou
         self.vis_resize_width = vis_resize_width
         logger.add(loguru_path, rotation="1 day", retention="7 days", level="DEBUG")
 
@@ -229,6 +224,7 @@ class PedestrainSamAutomaticMaskGenerator:
                 "point_coords": [mask_data["points"][idx].tolist()],
                 "stability_score": mask_data["stability_score"][idx].item(),
                 "crop_box": box_xyxy_to_xywh(mask_data["crop_boxes"][idx]).tolist(),
+                "person_probability": mask_data["person_probability"][idx].item(),
             }
             curr_anns.append(ann)
 
@@ -360,14 +356,12 @@ class PedestrainSamAutomaticMaskGenerator:
             sparse_embeddings=sparse_embeddings,
             dense_embeddings=dense_embeddings,
             predict_logit=True,
-            use_hq=self.use_hq,
-            use_res_iou=self.use_res_iou,
         )        
         sigmoid_person_logits = torch.sigmoid(person_logits.flatten(0, 1))
         data = MaskData(
             masks=prd_masks.flatten(0, 1), # 融合前两维度
             iou_preds=iou_preds.flatten(0, 1),
-            person_logits=sigmoid_person_logits,  # Store person_logits
+            person_probability=sigmoid_person_logits,  # Store person_logits
             points=points.repeat_interleave(prd_masks.shape[1], dim=0),
         )
         del prd_masks
@@ -377,7 +371,7 @@ class PedestrainSamAutomaticMaskGenerator:
         # Importantly, we threshold the masks here
         data["masks"] = data["masks"] > self.predictor._transforms.mask_threshold
         # Filter by person logits
-        keep_person = data["person_logits"] >= self.person_probability_thresh
+        keep_person = data["person_probability"] >= self.person_probability_thresh
         data.filter(keep_person)
         logger.info(f"经过人概率大于{self.person_probability_thresh}筛选,剩下{len(data["masks"])}个")
         # Filter by predicted IoU
@@ -394,7 +388,7 @@ class PedestrainSamAutomaticMaskGenerator:
             self.visualize_masks(
                 data["masks"],
                 data["iou_preds"],
-                data["person_logits"],
+                data["person_probability"],
                 data["stability_score"],  # Pass stability_score here
                 cropped_image,
                 image_path,
@@ -408,7 +402,6 @@ class PedestrainSamAutomaticMaskGenerator:
         # Compress to RLE
         data["masks"] = uncrop_masks(data["masks"], crop_box, orig_h, orig_w)
         data["rles"] = mask_to_rle_pytorch_one_by_one(data["masks"])
-        del data["masks"]
 
         return data
 
@@ -601,7 +594,9 @@ class PedestrainSamAutomaticMaskGenerator:
         return save_dir, image_base
 
     
-
+'''
+main function 主要是为了测试用的
+'''
 if __name__ == "__main__":
     config_path = "./train_config/train_large.yaml"
     with open(config_path, "r") as f:

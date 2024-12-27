@@ -23,6 +23,7 @@ class MaskDecoder(nn.Module):
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
         use_high_res_features: bool = False,
+        use_hq: bool = False,
         iou_prediction_use_sigmoid=False,
         dynamic_multimask_via_stability=False,
         dynamic_multimask_stability_delta=0.05,
@@ -106,39 +107,33 @@ class MaskDecoder(nn.Module):
         self.dynamic_multimask_via_stability = dynamic_multimask_via_stability
         self.dynamic_multimask_stability_delta = dynamic_multimask_stability_delta
         self.dynamic_multimask_stability_thresh = dynamic_multimask_stability_thresh
-        self.person_classifier_mlp = MLP(transformer_dim, transformer_dim, 1, 3)
-        self.person_classifier_token = nn.Embedding(1, transformer_dim)
         
-        #res-iou
-        self.res_iou_mlp = MLP(transformer_dim*2, transformer_dim, 1, 3)
+        self.use_hq = use_hq
+        if self.use_hq:
+            # HQ-SAM parameters #hq
+            self.hq_token = nn.Embedding(1, transformer_dim)  # HQ-Output-Token #hq
+            self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)  #hq
+            self.num_mask_tokens = self.num_mask_tokens + 1  
 
-        # HQ-SAM parameters #hq
-        self.hq_token = nn.Embedding(1, transformer_dim)  # HQ-Output-Token #hq
-        self.hf_mlp = MLP(transformer_dim, transformer_dim, transformer_dim // 8, 3)  #hq
-        self.num_mask_tokens = self.num_mask_tokens + 1  
-
-        # Convolutional layers for obtaining HQ-Feature #hq 反卷积的步长就是扩大的倍数,还有一个是通道数
-        self.compress_feature_2 = nn.Sequential(
-            nn.ConvTranspose2d(transformer_dim, transformer_dim // 2, kernel_size=2, stride=2),
-            LayerNorm2d(transformer_dim //2),  
-            nn.GELU(),
-            nn.ConvTranspose2d(transformer_dim // 2, transformer_dim // 8, kernel_size=2, stride=2),  
-        )  
-
-        
-        self.compress_feature_1 = nn.Sequential(
-            nn.ConvTranspose2d(transformer_dim , transformer_dim // 2, kernel_size=2, stride=2),
-            LayerNorm2d(transformer_dim //2),  
-            nn.GELU(),
-            nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
-        )  
-
-        self.compress_feature_0 = nn.Sequential( # 这里感受野就是3x3,这里是不是要大一点的感受野存疑，但是我感觉主要就是要针对比较小的物体的预测
-            nn.Conv2d(transformer_dim, transformer_dim // 2, 3, 1, 1),
-            LayerNorm2d(transformer_dim // 2),
-            nn.GELU(),
-            nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
-        )
+            # Convolutional layers for obtaining HQ-Feature #hq 反卷积的步长就是扩大的倍数,还有一个是通道数
+            self.compress_feature_2 = nn.Sequential(
+                nn.ConvTranspose2d(transformer_dim, transformer_dim // 2, kernel_size=2, stride=2),
+                LayerNorm2d(transformer_dim //2),  
+                nn.GELU(),
+                nn.ConvTranspose2d(transformer_dim // 2, transformer_dim // 8, kernel_size=2, stride=2),  
+            )  
+            self.compress_feature_1 = nn.Sequential(
+                nn.ConvTranspose2d(transformer_dim , transformer_dim // 2, kernel_size=2, stride=2),
+                LayerNorm2d(transformer_dim //2),  
+                nn.GELU(),
+                nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
+            )  
+            self.compress_feature_0 = nn.Sequential( # 这里感受野就是3x3,这里是不是要大一点的感受野存疑，但是我感觉主要就是要针对比较小的物体的预测
+                nn.Conv2d(transformer_dim, transformer_dim // 2, 3, 1, 1),
+                LayerNorm2d(transformer_dim // 2),
+                nn.GELU(),
+                nn.Conv2d(transformer_dim // 2, transformer_dim // 8, 3, 1, 1),
+            )
 
 
     def forward(
@@ -150,10 +145,8 @@ class MaskDecoder(nn.Module):
         multimask_output: bool,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
-        use_hq: bool = False,  #hq
-        use_res_iou: bool = False,  
         direct_high_res_features: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Predict masks given image and prompt embeddings.
 
@@ -170,39 +163,45 @@ class MaskDecoder(nn.Module):
           torch.Tensor: batched predictions of mask quality
           torch.Tensor: batched SAM token for mask output
         """
-        masks, iou_pred, mask_tokens_out, object_score_logits, person_classfication_logits = self.predict_masks(
+        masks, iou_pred, mask_tokens_out, object_score_logits = self.predict_masks(
             image_embeddings=image_embeddings,
             image_pe=image_pe,
             sparse_prompt_embeddings=sparse_prompt_embeddings,
             dense_prompt_embeddings=dense_prompt_embeddings,
             repeat_image=repeat_image,
             high_res_features=high_res_features,
-            use_hq = use_hq,
-            use_res_iou = use_res_iou,
             direct_high_res_features= direct_high_res_features,
         )
-
-        # HQ-SAM mask selection logic 
+         # Select the correct mask or masks for output
         if multimask_output:
-            # Mask with highest score 
-            mask_slice = slice(1, self.num_mask_tokens - 1)  
-            iou_pred_slice = iou_pred[:, mask_slice]  
-            iou_pred_max, max_iou_idx = torch.max(iou_pred_slice, dim=1)  
-            iou_pred = iou_pred_max.unsqueeze(1)  
-            masks_multi = masks[:, mask_slice, :, :]  
-            masks_sam = masks_multi[torch.arange(masks_multi.size(0)), max_iou_idx].unsqueeze(1)  
+            masks = masks[:, 0:4, :, :]
+            iou_pred = iou_pred[:, 0:4]
+        elif self.dynamic_multimask_via_stability and not self.training:
+            masks, iou_pred = self._dynamic_multimask_via_stability(masks, iou_pred)
         else:
-            mask_slice = slice(0, 1)  
-            iou_pred = iou_pred[:, mask_slice]  
-            masks_sam = masks[:, mask_slice]  
-            
-        if use_hq:
-            masks_hq = masks[:, slice(self.num_mask_tokens - 1, self.num_mask_tokens)]  #hq
-            masks = masks_sam + masks_hq  #hq
-        else:
-            masks = masks_sam
+            masks = masks[:, 0:1, :, :]
+            iou_pred = iou_pred[:, 0:1]
 
-        return masks, iou_pred, mask_tokens_out, object_score_logits, person_classfication_logits
+        if multimask_output and self.use_multimask_token_for_obj_ptr:
+            sam_tokens_out = mask_tokens_out[:, 0:]  # [b, 3, c] shape
+        else:
+            # Take the mask output token. Here we *always* use the token for single mask output.
+            # At test time, even if we track after 1-click (and using multimask_output=True),
+            # we still take the single mask token here. The rationale is that we always track
+            # after multiple clicks during training, so the past tokens seen during training
+            # are always the single mask token (and we'll let it be the object-memory token).
+            sam_tokens_out = mask_tokens_out[:, 0:1]  # [b, 1, c] shape
+
+            
+        if self.use_hq:
+            assert multimask_output == False # hq 不支持multimask
+            masks_hq = masks[:, slice(self.num_mask_tokens - 1, self.num_mask_tokens)]  #hq
+            masks = masks[0] + masks_hq  #hq
+        else:
+            masks = masks
+
+        return masks, iou_pred, sam_tokens_out, object_score_logits
+    
 
     def predict_masks(
         self,
@@ -212,39 +211,35 @@ class MaskDecoder(nn.Module):
         dense_prompt_embeddings: torch.Tensor,
         repeat_image: bool,
         high_res_features: Optional[List[torch.Tensor]] = None,
-        use_hq = False,  #[b,256,64,64]
-        use_res_iou = False,
         direct_high_res_features: Optional[List[torch.Tensor]] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Predicts masks. See 'forward' for more details. 内部函数没有其它地方调用"""
         # Concatenate output tokens
         s = 0
         if self.pred_obj_scores:
-            if use_hq is True:  
+            if self.use_hq is True:  
                 output_tokens = torch.cat(
                     [
                         self.obj_score_token.weight,
                         self.iou_token.weight,
                         self.mask_tokens.weight,
                         self.hq_token.weight,  #hq
-                        self.person_classifier_token.weight,
                     ],
                     dim=0,
                 )  #hq
             else:
                 output_tokens = torch.cat(
-                    [self.obj_score_token.weight, self.iou_token.weight, self.mask_tokens.weight, self.person_classifier_token.weight],
+                    [self.obj_score_token.weight, self.iou_token.weight, self.mask_tokens.weight],
                     dim=0,
                 )
             s = 1
         else:
-            if use_hq is True:
+            if self.use_hq is True:
                 output_tokens = torch.cat(
-                    [self.iou_token.weight, self.mask_tokens.weight, self.hq_token.weight, self.person_classifier_token.weight], dim=0
+                    [self.iou_token.weight, self.mask_tokens.weight, self.hq_token.weight], dim=0
                 )  #hq
             else:
-                output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight, self.person_classifier_token.weight], dim=0)
-
+                output_tokens = torch.cat([self.iou_token.weight, self.mask_tokens.weight], dim=0)
         output_tokens = output_tokens.unsqueeze(0).expand(
             sparse_prompt_embeddings.size(0), -1, -1
         )
@@ -267,7 +262,6 @@ class MaskDecoder(nn.Module):
         hs, src = self.transformer(src, pos_src, tokens)
         iou_token_out = hs[:, s, :]
         mask_tokens_out = hs[:, s + 1 : (s + 1 + self.num_mask_tokens), :] # hq算是mask_token
-        person_class_token = hs[:, s + 1 + self.num_mask_tokens, :]
 
         # Upscale mask embeddings and predict masks using the mask tokens
         src = src.transpose(1, 2).view(b, c, h, w)
@@ -281,14 +275,15 @@ class MaskDecoder(nn.Module):
 
         # HQ-SAM upscaled embeddings #hq
         upscaled_embedding_sam = upscaled_embedding  #hq
-        if use_hq is True:  #hq
+        if self.use_hq is True:  #hq
             d_feat_s0, d_feat_s1 = direct_high_res_features
             upscaled_embedding_hq = self.compress_feature_2(src) + self.compress_feature_1(d_feat_s1) + self.compress_feature_0(d_feat_s0)  #hq
 
         # Generate mask predictions
         hyper_in_list: List[torch.Tensor] = []
+        output_hypernetworks_mlps_length =  len(self.output_hypernetworks_mlps)
         for i in range(self.num_mask_tokens):
-            if i < self.num_mask_tokens - 1:
+            if i < output_hypernetworks_mlps_length:
                 hyper_in_list.append(
                     self.output_hypernetworks_mlps[i](mask_tokens_out[:, i, :])
                 )
@@ -297,33 +292,31 @@ class MaskDecoder(nn.Module):
         hyper_in = torch.stack(hyper_in_list, dim=1)
         b, c, h, w = upscaled_embedding_sam.shape 
 
-        masks_sam = (hyper_in[:, : self.num_mask_tokens - 1] @ upscaled_embedding_sam.view(b, c, h * w)).view(
-            b, -1, h, w
-        ) 
-        if use_hq is True:  #hq
+        
+        if self.use_hq is True:  #hq
+            masks_sam = (hyper_in[:, : self.num_mask_tokens - 1] @ upscaled_embedding_sam.view(b, c, h * w)).view(
+                b, -1, h, w
+            ) 
             masks_hq = (hyper_in[:, self.num_mask_tokens - 1 :] @ upscaled_embedding_hq.view(b, c, h * w)).view(
                 b, -1, h, w
             )  
             masks = torch.cat([masks_sam, masks_hq], dim=1)
         else:
+            masks_sam = (hyper_in @ upscaled_embedding_sam.view(b, c, h * w)).view(
+                b, -1, h, w
+            ) 
             masks = masks_sam 
 
         # Generate mask quality predictions
-
         iou_pred = self.iou_prediction_head(iou_token_out)
-        if use_res_iou:
-            res_iou_token = torch.cat([iou_token_out.unsqueeze(1).repeat(1,4,1), mask_tokens_out[:,:4]], dim=-1)
-            res_iou = self.res_iou_mlp(res_iou_token)
-            iou_pred = iou_pred + res_iou.squeeze(-1)
         if self.pred_obj_scores:
             assert s == 1
             object_score_logits = self.pred_obj_score_head(hs[:, 0, :])
         else:
             # Obj scores logits - default to 10.0, i.e. assuming the object is present, sigmoid(10)=1
             object_score_logits = 10.0 * iou_pred.new_ones(iou_pred.shape[0], 1)
-        person_classfication_logits = self.person_classifier_mlp(person_class_token)
-        return masks, iou_pred, mask_tokens_out, object_score_logits, person_classfication_logits
-
+        return masks, iou_pred, mask_tokens_out, object_score_logits
+    
     def _get_stability_scores(self, mask_logits):
         """
         Compute stability scores of the mask logits based on the IoU between upper and

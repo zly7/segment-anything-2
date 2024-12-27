@@ -14,6 +14,9 @@ model:
       global_att_blocks: [23, 33, 43]
       window_pos_embed_bkg_spatial_size: [7, 7]
       window_spec: [8, 4, 16, 8]
+      lora_enabled: true  # Enable or disable LoRA
+      lora_r: 4           # Adjust the rank of the LoRA matrices
+      lora_alpha: 1.0     # Scaling factor for LoRA
     neck:
       _target_: sam2.modeling.backbones.image_encoder.FpnNeck
       position_encoding:

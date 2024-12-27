@@ -10,6 +10,9 @@ model:
       _target_: sam2.modeling.backbones.hieradet.Hiera
       embed_dim: 112
       num_heads: 2
+      lora_enabled: true  # Enable or disable LoRA
+      lora_r: 4           # Adjust the rank of the LoRA matrices
+      lora_alpha: 1.0     # Scaling factor for LoRA
     neck:
       _target_: sam2.modeling.backbones.image_encoder.FpnNeck
       position_encoding:

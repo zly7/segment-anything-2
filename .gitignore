@@ -11,3 +11,6 @@ checkpoints/*.pt
 *.png
 *.jpg
 logs*/*
+runs*/*
+*.torch
+*.db

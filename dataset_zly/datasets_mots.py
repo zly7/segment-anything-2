@@ -94,22 +94,30 @@ class MOTSDataset(Dataset):
         else:
             return len(self.data)
 
+    # def __getitem__(self, idx):
+    #     start_time = time.time()
+    #     max_retries = 10
+    #     for attempt in range(1, max_retries + 1):
+    #         if self.enable_negative_sample and (int(time.time() * 1000) % 2) == 0:
+    #             sample =  self.get_negative_sample(idx)
+    #         else:
+    #             sample =  self.get_positive_sample(idx)
+    #         h, w = self.img_output_size, self.img_output_size
+    #         click_point = sample['click_point'].squeeze(0).numpy()  # (2,)
+    #         x, y = click_point
+    #         if 0 <= x < w and 0 <= y < h:
+    #             return sample
+    #         else:
+    #             if attempt > 3:
+    #                 logger.warning(f"Attempt {attempt}: click_point ({x}, {y}) out of image bounds ({w}, {h}). Resampling.")
+    #     logger.error(f"Failed to obtain a valid sample after {max_retries} attempts for index {idx}.")
+    #     spend_time = time.time() - start_time
+    #     if spend_time > 1.0:
+    #         logger.debug(f"MOTSdataset, Time taken for sample {idx}: {spend_time:.2f} seconds.")
+    #     return sample
     def __getitem__(self, idx):
-        max_retries = 10
-        for attempt in range(1, max_retries + 1):
-            if self.enable_negative_sample and (int(time.time() * 1000) % 2) == 0:
-                sample =  self.get_negative_sample(idx)
-            else:
-                sample =  self.get_positive_sample(idx)
-            h, w = self.img_output_size, self.img_output_size
-            click_point = sample['click_point'].squeeze(0).numpy()  # (2,)
-            x, y = click_point
-            if 0 <= x < w and 0 <= y < h:
-                return sample
-            else:
-                if attempt > 3:
-                    logger.warning(f"Attempt {attempt}: click_point ({x}, {y}) out of image bounds ({w}, {h}). Resampling.")
-        logger.error(f"Failed to obtain a valid sample after {max_retries} attempts for index {idx}.")
+        sample = self.get_positive_sample(idx)
+        # sample = self.get_negative_sample(idx)
         return sample
 
     def get_positive_sample(self, idx):

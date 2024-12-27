@@ -12,7 +12,9 @@ from tqdm import tqdm
 import yaml
 from .trainer_ddp import PedestrainSAM2, build_sam2_for_self_train
 
-
+'''
+这个函数是纯纯的画图函数，所以没啥用
+'''
 # Define the dataset class
 class CocoDataset(Dataset):
     def __init__(self, images_dir, annotations_file, transform=None):
@@ -189,7 +191,6 @@ def main():
                     sparse_embeddings=None,
                     dense_embeddings=None,
                     predict_logit=False,
-                    use_hq=False
                 )
                 assert masks.shape[1] == 1
                 masks = masks[:, 0]
